@@ -3,15 +3,15 @@ package main
 import (
 	"sync"
 
+	"code.gitea.io/sdk/gitea"
 	"github.com/google/go-github/v74/github"
-	"github.com/xanzy/go-gitlab"
 )
 
 const (
 	githubPullRequestCacheType uint8 = iota
 	githubSearchResultsCacheType
 	githubUserCacheType
-	gitlabUserCacheType
+	giteaUserCacheType
 )
 
 type objectCache struct {
@@ -24,7 +24,7 @@ func newObjectCache() *objectCache {
 	store[githubPullRequestCacheType] = make(map[string]any)
 	store[githubSearchResultsCacheType] = make(map[string]any)
 	store[githubUserCacheType] = make(map[string]any)
-	store[gitlabUserCacheType] = make(map[string]any)
+	store[giteaUserCacheType] = make(map[string]any)
 
 	return &objectCache{
 		mutex: new(sync.RWMutex),
@@ -65,7 +65,7 @@ func (c objectCache) setGithubSearchResults(query string, result github.IssuesSe
 func (c objectCache) getGithubUser(username string) *github.User {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-	if v, ok := c.store[gitlabUserCacheType][username]; ok {
+	if v, ok := c.store[giteaUserCacheType][username]; ok {
 		return pointer(v.(github.User))
 	}
 	return nil
@@ -74,19 +74,19 @@ func (c objectCache) getGithubUser(username string) *github.User {
 func (c objectCache) setGithubUser(username string, user github.User) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	c.store[gitlabUserCacheType][username] = user
+	c.store[giteaUserCacheType][username] = user
 }
 
-func (c objectCache) getGitlabUser(username string) *gitlab.User {
+func (c objectCache) getGiteaUser(username string) *gitea.User {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	if v, ok := c.store[githubUserCacheType][username]; ok {
-		return pointer(v.(gitlab.User))
+		return pointer(v.(gitea.User))
 	}
 	return nil
 }
 
-func (c objectCache) setGitlabUser(username string, user gitlab.User) {
+func (c objectCache) setGiteaUser(username string, user gitea.User) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	c.store[githubUserCacheType][username] = user

@@ -29,13 +29,13 @@ jobs:
       - name: Build
         run: |
           mkdir -p dist
-          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o dist/gitlab-migrator-${{ matrix.goos }}-${{ matrix.goarch }}
+          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o dist/gitea-github-migrator-${{ matrix.goos }}-${{ matrix.goarch }}
 
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
-          name: gitlab-migrator-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/gitlab-migrator-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: gitea-github-migrator-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/gitea-github-migrator-${{ matrix.goos }}-${{ matrix.goarch }}
 
   release:
     runs-on: ubuntu-latest
@@ -50,7 +50,7 @@ jobs:
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          files: "dist/*/gitlab-migrator-*"
+          files: "dist/*/gitea-github-migrator-*"
           fail_on_unmatched_files: true
 
 

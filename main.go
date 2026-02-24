@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"code.gitea.io/sdk/gitea"
 	"github.com/go-git/go-billy/v5/memfs"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
@@ -33,34 +34,33 @@ import (
 	"github.com/hashicorp/go-cleanhttp"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-retryablehttp"
-	"github.com/xanzy/go-gitlab"
 )
 
 const (
 	dateFormat          = "Mon, 2 Jan 2006"
 	defaultGithubDomain = "github.com"
-	defaultGitlabDomain = "gitlab.com"
+	defaultGiteaDomain  = "gitea.com"
 )
 
 var loop, report bool
 var deleteExistingRepos, enablePullRequests, renameMasterToMain bool
-var githubDomain, githubRepo, githubToken, githubUser, gitlabDomain, gitlabProject, gitlabToken, projectsCsvPath, renameTrunkBranch string
+var githubDomain, githubRepo, githubToken, githubUser, giteaDomain, giteaProject, giteaToken, projectsCsvPath, renameTrunkBranch string
 
 var (
 	cache          *objectCache
 	errCount       int
 	logger         hclog.Logger
 	gh             *github.Client
-	gl             *gitlab.Client
+	gi             *gitea.Client
 	maxConcurrency int
 )
 
 type Project = []string
 
 type Report struct {
-	GroupName          string
-	ProjectName        string
-	MergeRequestsCount int
+	OwnerName         string
+	RepoName          string
+	PullRequestsCount int
 }
 
 type GitHubError struct {
@@ -127,7 +127,7 @@ func main() {
 	}()
 
 	logger = hclog.New(&hclog.LoggerOptions{
-		Name:  "gitlab-migrator",
+		Name:  "gitea-github-migrator",
 		Level: hclog.LevelFromString(os.Getenv("LOG_LEVEL")),
 	})
 
@@ -139,9 +139,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	gitlabToken = os.Getenv("GITLAB_TOKEN")
-	if gitlabToken == "" {
-		logger.Error("missing environment variable", "name", "GITLAB_TOKEN")
+	giteaToken = os.Getenv("GITEA_TOKEN")
+	if giteaToken == "" {
+		logger.Error("missing environment variable", "name", "GITEA_TOKEN")
 		os.Exit(1)
 	}
 
@@ -155,9 +155,9 @@ func main() {
 	flag.StringVar(&githubDomain, "github-domain", defaultGithubDomain, "specifies the GitHub domain to use")
 	flag.StringVar(&githubRepo, "github-repo", "", "the GitHub repository to migrate to")
 	flag.StringVar(&githubUser, "github-user", "", "specifies the GitHub user to use, who will author any migrated PRs (required)")
-	flag.StringVar(&gitlabDomain, "gitlab-domain", defaultGitlabDomain, "specifies the GitLab domain to use")
-	flag.StringVar(&gitlabProject, "gitlab-project", "", "the GitLab project to migrate")
-	flag.StringVar(&projectsCsvPath, "projects-csv", "", "specifies the path to a CSV file describing projects to migrate (incompatible with -gitlab-project and -github-repo)")
+	flag.StringVar(&giteaDomain, "gitea-domain", defaultGiteaDomain, "specifies the Gitea domain to use")
+	flag.StringVar(&giteaProject, "gitea-project", "", "the Gitea project to migrate")
+	flag.StringVar(&projectsCsvPath, "projects-csv", "", "specifies the path to a CSV file describing projects to migrate (incompatible with -gitea-project and -github-repo)")
 	flag.StringVar(&renameTrunkBranch, "rename-trunk-branch", "", "specifies the new trunk branch name (incompatible with -rename-master-to-main)")
 
 	flag.IntVar(&maxConcurrency, "max-concurrency", 4, "how many projects to migrate in parallel")
@@ -173,13 +173,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	repoSpecifiedInline := githubRepo != "" && gitlabProject != ""
+	repoSpecifiedInline := githubRepo != "" && giteaProject != ""
 	if repoSpecifiedInline && projectsCsvPath != "" {
-		logger.Error("cannot specify -projects-csv and either -github-repo or -gitlab-project at the same time")
+		logger.Error("cannot specify -projects-csv and either -github-repo or -gitea-project at the same time")
 		os.Exit(1)
 	}
 	if !repoSpecifiedInline && projectsCsvPath == "" {
-		logger.Error("must specify either -projects-csv or both of -github-repo and -gitlab-project")
+		logger.Error("must specify either -projects-csv or both of -github-repo and -gitea-project")
 		os.Exit(1)
 	}
 
@@ -330,12 +330,8 @@ func main() {
 		}
 	}
 
-	gitlabOpts := make([]gitlab.ClientOptionFunc, 0)
-	if gitlabDomain != defaultGitlabDomain {
-		gitlabUrl := fmt.Sprintf("https://%s", gitlabDomain)
-		gitlabOpts = append(gitlabOpts, gitlab.WithBaseURL(gitlabUrl))
-	}
-	if gl, err = gitlab.NewClient(gitlabToken, gitlabOpts...); err != nil {
+	giteaUrl := fmt.Sprintf("https://%s", giteaDomain)
+	if gi, err = gitea.NewClient(giteaUrl, gitea.SetToken(giteaToken)); err != nil {
 		sendErr(err)
 		os.Exit(1)
 	}
@@ -356,7 +352,7 @@ func main() {
 			os.Exit(1)
 		}
 	} else {
-		projects = []Project{{gitlabProject, githubRepo}}
+		projects = []Project{{giteaProject, githubRepo}}
 	}
 
 	if report {
@@ -378,20 +374,20 @@ func parseProjectSlugs(proj []string) ([]string, []string, error) {
 	}
 
 	delimPosition := strings.LastIndex(proj[0], "/")
-	gitlabPath := []string{
+	giteaPath := []string{
 		proj[0][:delimPosition],
 		proj[0][delimPosition+1:],
 	}
 	githubPath := strings.Split(proj[1], "/")
 
-	if len(gitlabPath) != 2 {
-		return nil, nil, fmt.Errorf("invalid GitLab project: %s", proj[0])
+	if len(giteaPath) != 2 {
+		return nil, nil, fmt.Errorf("invalid Gitea project: %s", proj[0])
 	}
 	if len(githubPath) != 2 {
 		return nil, nil, fmt.Errorf("invalid GitHub project: %s", proj[1])
 	}
 
-	return gitlabPath, githubPath, nil
+	return giteaPath, githubPath, nil
 }
 
 func printReport(ctx context.Context, projects []Project) {
@@ -419,7 +415,7 @@ func printReport(ctx context.Context, projects []Project) {
 
 	totalMergeRequests := 0
 	for _, result := range results {
-		totalMergeRequests += result.MergeRequestsCount
+		totalMergeRequests += result.PullRequestsCount
 		fmt.Printf("%#v\n", result)
 	}
 
@@ -429,49 +425,26 @@ func printReport(ctx context.Context, projects []Project) {
 }
 
 func reportProject(_ context.Context, proj []string) (*Report, error) {
-	gitlabPath, _, err := parseProjectSlugs(proj)
+	giteaPath, _, err := parseProjectSlugs(proj)
 	if err != nil {
 		return nil, fmt.Errorf("parsing project slugs: %v", err)
 	}
 
-	logger.Debug("searching for GitLab project", "name", gitlabPath[1], "group", gitlabPath[0])
-	searchTerm := gitlabPath[1]
-	projectResult, _, err := gl.Projects.ListProjects(&gitlab.ListProjectsOptions{Search: &searchTerm})
-	if err != nil {
-		return nil, fmt.Errorf("listing projects: %v", err)
+	var pullRequests []*gitea.PullRequest
+
+	opts := gitea.ListPullRequestsOptions{
+		State: gitea.StateAll,
+		Sort:  "leastupdate",
 	}
 
-	var project *gitlab.Project
-	for _, item := range projectResult {
-		if item == nil {
-			continue
-		}
-
-		if item.PathWithNamespace == proj[0] {
-			logger.Debug("found GitLab project", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", item.ID)
-			project = item
-		}
-	}
-
-	if project == nil {
-		return nil, fmt.Errorf("no matching GitLab project found: %s", proj[0])
-	}
-
-	var mergeRequests []*gitlab.MergeRequest
-
-	opts := &gitlab.ListProjectMergeRequestsOptions{
-		OrderBy: pointer("created_at"),
-		Sort:    pointer("asc"),
-	}
-
-	logger.Debug("retrieving GitLab merge requests", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID)
+	logger.Debug("retrieving Gitea pull requests", "repo", giteaPath[1], "owner", giteaPath[0])
 	for {
-		result, resp, err := gl.MergeRequests.ListProjectMergeRequests(project.ID, opts)
+		result, resp, err := gi.ListRepoPullRequests(giteaPath[0], giteaPath[1], opts)
 		if err != nil {
-			return nil, fmt.Errorf("retrieving gitlab merge requests: %v", err)
+			return nil, fmt.Errorf("retrieving gitea pull requests: %v", err)
 		}
 
-		mergeRequests = append(mergeRequests, result...)
+		pullRequests = append(pullRequests, result...)
 
 		if resp.NextPage == 0 {
 			break
@@ -481,9 +454,9 @@ func reportProject(_ context.Context, proj []string) (*Report, error) {
 	}
 
 	return &Report{
-		GroupName:          gitlabPath[0],
-		ProjectName:        gitlabPath[1],
-		MergeRequestsCount: len(mergeRequests),
+		OwnerName:         giteaPath[0],
+		RepoName:          giteaPath[1],
+		PullRequestsCount: len(pullRequests),
 	}, nil
 }
 
@@ -547,40 +520,27 @@ func performMigration(ctx context.Context, projects []Project) error {
 }
 
 func migrateProject(ctx context.Context, proj []string) error {
-	gitlabPath, githubPath, err := parseProjectSlugs(proj)
+	giteaPath, githubPath, err := parseProjectSlugs(proj)
 	if err != nil {
 		return fmt.Errorf("parsing project slugs: %v", err)
 	}
 
-	logger.Info("searching for GitLab project", "name", gitlabPath[1], "group", gitlabPath[0])
-	searchTerm := gitlabPath[1]
-	projectResult, _, err := gl.Projects.ListProjects(&gitlab.ListProjectsOptions{Search: &searchTerm})
+	logger.Info("searching for Gitea repository", "repo", giteaPath[1], "owner", giteaPath[0])
+	giteaRepository, _, err := gi.GetRepo(giteaPath[0], giteaPath[1])
 	if err != nil {
-		return fmt.Errorf("listing projects: %v", err)
+		return fmt.Errorf("retrieve gitea repository: %v", err)
 	}
 
-	var project *gitlab.Project
-	for _, item := range projectResult {
-		if item == nil {
-			continue
-		}
-
-		if item.PathWithNamespace == proj[0] {
-			logger.Debug("found GitLab project", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", item.ID)
-			project = item
-		}
+	if giteaRepository == nil {
+		return fmt.Errorf("no matching Gitea repository found: %s", proj[0])
 	}
 
-	if project == nil {
-		return fmt.Errorf("no matching GitLab project found: %s", proj[0])
-	}
-
-	cloneUrl, err := url.Parse(project.HTTPURLToRepo)
+	cloneUrl, err := url.Parse(giteaRepository.CloneURL)
 	if err != nil {
 		return fmt.Errorf("parsing clone URL: %v", err)
 	}
 
-	logger.Info("mirroring repository from GitLab to GitHub", "name", gitlabPath[1], "group", gitlabPath[0], "github_org", githubPath[0], "github_repo", githubPath[1])
+	logger.Info("mirroring repository from Gitea to GitHub", "name", giteaPath[1], "group", giteaPath[0], "github_org", githubPath[0], "github_repo", githubPath[1])
 
 	user, err := getGithubUser(ctx, githubPath[0])
 	if err != nil {
@@ -618,11 +578,11 @@ func migrateProject(ctx context.Context, proj []string) error {
 	defaultBranch := "main"
 	if renameTrunkBranch != "" {
 		defaultBranch = renameTrunkBranch
-	} else if !renameMasterToMain && project.DefaultBranch != "" {
-		defaultBranch = project.DefaultBranch
+	} else if !renameMasterToMain && giteaRepository.DefaultBranch != "" {
+		defaultBranch = giteaRepository.DefaultBranch
 	}
 
-	homepage := fmt.Sprintf("https://%s/%s/%s", gitlabDomain, gitlabPath[0], gitlabPath[1])
+	homepage := fmt.Sprintf("https://%s/%s/%s", giteaDomain, giteaPath[0], giteaPath[1])
 
 	if createRepo {
 		if repoDeleted {
@@ -632,7 +592,7 @@ func migrateProject(ctx context.Context, proj []string) error {
 		}
 		newRepo := github.Repository{
 			Name:          pointer(githubPath[1]),
-			Description:   &project.Description,
+			Description:   &giteaRepository.Description,
 			Homepage:      &homepage,
 			DefaultBranch: &defaultBranch,
 			Private:       pointer(true),
@@ -646,7 +606,7 @@ func migrateProject(ctx context.Context, proj []string) error {
 	}
 
 	logger.Debug("updating repository settings", "owner", githubPath[0], "repo", githubPath[1])
-	description := regexp.MustCompile("\r|\n").ReplaceAllString(project.Description, " ")
+	description := regexp.MustCompile("\r|\n").ReplaceAllString(giteaRepository.Description, " ")
 	updateRepo := github.Repository{
 		Name:              pointer(githubPath[1]),
 		Description:       &description,
@@ -661,35 +621,35 @@ func migrateProject(ctx context.Context, proj []string) error {
 		return fmt.Errorf("updating github repo: %v", err)
 	}
 
-	cloneUrl.User = url.UserPassword("oauth2", gitlabToken)
+	cloneUrl.User = url.UserPassword("oauth2", giteaToken)
 	cloneUrlWithCredentials := cloneUrl.String()
 
 	// In-memory filesystem for worktree operations
 	fs := memfs.New()
 
-	logger.Debug("cloning repository", "name", gitlabPath[1], "group", gitlabPath[0], "url", project.HTTPURLToRepo)
-	repo, err := git.CloneContext(ctx, memory.NewStorage(), fs, &git.CloneOptions{
+	logger.Debug("cloning repository", "name", giteaPath[1], "group", giteaPath[0], "url", giteaRepository.CloneURL)
+	gitRepo, err := git.CloneContext(ctx, memory.NewStorage(), fs, &git.CloneOptions{
 		URL:        cloneUrlWithCredentials,
 		Auth:       nil,
-		RemoteName: "gitlab",
+		RemoteName: "gitea",
 		Mirror:     true,
 	})
 	if err != nil {
-		return fmt.Errorf("cloning gitlab repo: %v", err)
+		return fmt.Errorf("cloning gitea repo: %v", err)
 	}
 
-	if defaultBranch != project.DefaultBranch {
-		if gitlabTrunk, err := repo.Reference(plumbing.NewBranchReferenceName(project.DefaultBranch), false); err == nil {
-			logger.Info("renaming trunk branch prior to push", "name", gitlabPath[1], "group", gitlabPath[0], "gitlab_trunk", project.DefaultBranch, "github_trunk", defaultBranch, "sha", gitlabTrunk.Hash())
+	if defaultBranch != giteaRepository.DefaultBranch {
+		if giteaTrunk, err := gitRepo.Reference(plumbing.NewBranchReferenceName(giteaRepository.DefaultBranch), false); err == nil {
+			logger.Info("renaming trunk branch prior to push", "repo", giteaPath[1], "owner", giteaPath[0], "gitea_trunk", giteaRepository.DefaultBranch, "github_trunk", defaultBranch, "sha", giteaTrunk.Hash())
 
-			logger.Debug("creating new trunk branch", "name", gitlabPath[1], "group", gitlabPath[0], "github_trunk", defaultBranch, "sha", gitlabTrunk.Hash())
-			githubTrunk := plumbing.NewHashReference(plumbing.NewBranchReferenceName(defaultBranch), gitlabTrunk.Hash())
-			if err = repo.Storer.SetReference(githubTrunk); err != nil {
+			logger.Debug("creating new trunk branch", "repo", giteaPath[1], "owner", giteaPath[0], "github_trunk", defaultBranch, "sha", giteaTrunk.Hash())
+			githubTrunk := plumbing.NewHashReference(plumbing.NewBranchReferenceName(defaultBranch), giteaTrunk.Hash())
+			if err = gitRepo.Storer.SetReference(githubTrunk); err != nil {
 				return fmt.Errorf("creating trunk branch: %v", err)
 			}
 
-			logger.Debug("deleting old trunk branch", "name", gitlabPath[1], "group", gitlabPath[0], "gitlab_trunk", project.DefaultBranch, "sha", gitlabTrunk.Hash())
-			if err = repo.Storer.RemoveReference(gitlabTrunk.Name()); err != nil {
+			logger.Debug("deleting old trunk branch", "repo", giteaPath[1], "owner", giteaPath[0], "gitea_trunk", giteaRepository.DefaultBranch, "sha", giteaTrunk.Hash())
+			if err = gitRepo.Storer.RemoveReference(giteaTrunk.Name()); err != nil {
 				return fmt.Errorf("deleting old trunk branch: %v", err)
 			}
 		}
@@ -698,8 +658,8 @@ func migrateProject(ctx context.Context, proj []string) error {
 	githubUrl := fmt.Sprintf("https://%s/%s/%s", githubDomain, githubPath[0], githubPath[1])
 	githubUrlWithCredentials := fmt.Sprintf("https://%s:%s@%s/%s/%s", githubUser, githubToken, githubDomain, githubPath[0], githubPath[1])
 
-	logger.Debug("adding remote for GitHub repository", "name", gitlabPath[1], "group", gitlabPath[0], "url", githubUrl)
-	if _, err = repo.CreateRemote(&config.RemoteConfig{
+	logger.Debug("adding remote for GitHub repository", "repo", giteaPath[1], "owner", giteaPath[0], "url", githubUrl)
+	if _, err = gitRepo.CreateRemote(&config.RemoteConfig{
 		Name:   "github",
 		URLs:   []string{githubUrlWithCredentials},
 		Mirror: true,
@@ -707,27 +667,27 @@ func migrateProject(ctx context.Context, proj []string) error {
 		return fmt.Errorf("adding github remote: %v", err)
 	}
 
-	logger.Debug("force-pushing to GitHub repository", "name", gitlabPath[1], "group", gitlabPath[0], "url", githubUrl)
-	if err = repo.PushContext(ctx, &git.PushOptions{
+	logger.Debug("force-pushing to GitHub repository", "repo", giteaPath[1], "owner", giteaPath[0], "url", githubUrl)
+	if err = gitRepo.PushContext(ctx, &git.PushOptions{
 		RemoteName: "github",
 		Force:      true,
 		//Prune:      true, // causes error, attempts to delete main branch
 	}); err != nil {
 		if errors.Is(err, git.NoErrAlreadyUpToDate) {
-			logger.Debug("repository already up-to-date on GitHub", "name", gitlabPath[1], "group", gitlabPath[0], "url", githubUrl)
+			logger.Debug("repository already up-to-date on GitHub", "repo", giteaPath[1], "owner", giteaPath[0], "url", githubUrl)
 		} else {
 			return fmt.Errorf("pushing to github repo: %v", err)
 		}
 	}
 
-	logger.Debug("pushing tags to GitHub repository", "name", gitlabPath[1], "group", gitlabPath[0], "url", githubUrl)
-	if err = repo.PushContext(ctx, &git.PushOptions{
+	logger.Debug("pushing tags to GitHub repository", "repo", giteaPath[1], "owner", giteaPath[0], "url", githubUrl)
+	if err = gitRepo.PushContext(ctx, &git.PushOptions{
 		RemoteName: "github",
 		Force:      true,
 		RefSpecs:   []config.RefSpec{"refs/tags/*:refs/tags/*"},
 	}); err != nil {
 		if errors.Is(err, git.NoErrAlreadyUpToDate) {
-			logger.Debug("repository already up-to-date on GitHub", "name", gitlabPath[1], "group", gitlabPath[0], "url", githubUrl)
+			logger.Debug("repository already up-to-date on GitHub", "repo", giteaPath[1], "owner", giteaPath[0], "url", githubUrl)
 		} else {
 			return fmt.Errorf("pushing to github repo: %v", err)
 		}
@@ -742,29 +702,29 @@ func migrateProject(ctx context.Context, proj []string) error {
 	}
 
 	if enablePullRequests {
-		migratePullRequests(ctx, githubPath, gitlabPath, defaultBranch, project, repo)
+		migratePullRequests(ctx, githubPath, giteaPath, defaultBranch, giteaRepository, gitRepo)
 	}
 
 	return nil
 }
 
-func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, defaultBranch string, project *gitlab.Project, repo *git.Repository) {
-	var mergeRequests []*gitlab.MergeRequest
+func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, defaultBranch string, giteaRepository *gitea.Repository, gitRepo *git.Repository) {
+	var giteaPullRequests []*gitea.PullRequest
 
-	opts := &gitlab.ListProjectMergeRequestsOptions{
-		OrderBy: pointer("created_at"),
-		Sort:    pointer("asc"),
+	opts := gitea.ListPullRequestsOptions{
+		State: gitea.StateAll,
+		Sort:  "leastupdate",
 	}
 
-	logger.Debug("retrieving GitLab merge requests", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID)
+	logger.Debug("retrieving Gitea pull requests", "repo", giteaPath[1], "owner", giteaPath[0])
 	for {
-		result, resp, err := gl.MergeRequests.ListProjectMergeRequests(project.ID, opts)
+		result, resp, err := gi.ListRepoPullRequests(giteaPath[0], giteaPath[1], opts)
 		if err != nil {
-			sendErr(fmt.Errorf("retrieving gitlab merge requests: %v", err))
+			sendErr(fmt.Errorf("retrieving gitea pull requests: %v", err))
 			return
 		}
 
-		mergeRequests = append(mergeRequests, result...)
+		giteaPullRequests = append(giteaPullRequests, result...)
 
 		if resp.NextPage == 0 {
 			break
@@ -774,10 +734,10 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, d
 	}
 
 	var successCount, failureCount int
-	totalCount := len(mergeRequests)
-	logger.Info("migrating merge requests from GitLab to GitHub", "name", gitlabPath[1], "group", gitlabPath[0], "count", totalCount)
-	for _, mergeRequest := range mergeRequests {
-		if mergeRequest == nil {
+	totalCount := len(giteaPullRequests)
+	logger.Info("migrating pull requests from Gitea to GitHub", "repo", giteaPath[1], "owner", giteaPath[0], "count", totalCount)
+	for _, giteaPullRequest := range giteaPullRequests {
+		if giteaPullRequest == nil {
 			continue
 		}
 
@@ -787,14 +747,14 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, d
 			break
 		}
 
-		sourceBranchForClosedMergeRequest := fmt.Sprintf("migration-source-%d/%s", mergeRequest.IID, mergeRequest.SourceBranch)
-		targetBranchForClosedMergeRequest := fmt.Sprintf("migration-target-%d/%s", mergeRequest.IID, mergeRequest.TargetBranch)
+		sourceBranchForClosedPullRequest := fmt.Sprintf("migration-source-%d/%s", giteaPullRequest.ID, giteaPullRequest.Head.Ref)
+		targetBranchForClosedPullRequest := fmt.Sprintf("migration-target-%d/%s", giteaPullRequest.ID, giteaPullRequest.Base.Ref)
 
 		var cleanUpBranch bool
-		var pullRequest *github.PullRequest
+		var pullRequest *github.PullRequest // TODO: rename to githubPullRequest
 
-		logger.Debug("searching for any existing pull request", "owner", githubPath[0], "repo", githubPath[1], "merge_request_id", mergeRequest.IID)
-		sourceBranches := []string{mergeRequest.SourceBranch, sourceBranchForClosedMergeRequest}
+		logger.Debug("searching for any existing pull request", "owner", githubPath[0], "repo", githubPath[1], "pull_request_id", giteaPullRequest.ID)
+		sourceBranches := []string{giteaPullRequest.Head.Ref, sourceBranchForClosedPullRequest}
 		branchQuery := fmt.Sprintf("head:%s", strings.Join(sourceBranches, " OR head:"))
 		query := fmt.Sprintf("repo:%s/%s AND is:pr AND (%s)", githubPath[0], githubPath[1], branchQuery)
 		searchResult, err := getGithubSearchResults(ctx, query)
@@ -827,17 +787,17 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, d
 
 				if m := regexp.MustCompile(".+/([0-9]+)$").FindStringSubmatch(prUrl.Path); len(m) == 2 {
 					prNumber, _ := strconv.Atoi(m[1])
-					pr, err := getGithubPullRequest(ctx, githubPath[0], githubPath[1], prNumber)
+					ghPr, err := getGithubPullRequest(ctx, githubPath[0], githubPath[1], prNumber)
 					if err != nil {
 						sendErr(fmt.Errorf("retrieving pull request: %v", err))
 						skip = true
 						break
 					}
 
-					if strings.Contains(pr.GetBody(), fmt.Sprintf("**GitLab MR Number** | %d", mergeRequest.IID)) ||
-						strings.Contains(pr.GetBody(), fmt.Sprintf("**GitLab MR Number** | [%d]", mergeRequest.IID)) {
-						logger.Debug("found existing pull request", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pr.GetNumber())
-						pullRequest = pr
+					if strings.Contains(ghPr.GetBody(), fmt.Sprintf("**Gitea PR Number** | %d", giteaPullRequest.ID)) ||
+						strings.Contains(ghPr.GetBody(), fmt.Sprintf("**Gitea PR Number** | [%d]", giteaPullRequest.ID)) {
+						logger.Debug("found existing pull request", "owner", githubPath[0], "repo", githubPath[1], "pr_number", ghPr.GetNumber())
+						pullRequest = ghPr
 						break
 					}
 				}
@@ -848,11 +808,11 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, d
 		}
 
 		// Proceed to create temporary branches when migrating a merged/closed merge request that doesn't yet have a counterpart PR in GitHub (can't create one without a branch)
-		if pullRequest == nil && !strings.EqualFold(mergeRequest.State, "opened") {
-			logger.Trace("searching for existing branch for closed/merged merge request", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID, "merge_request_id", mergeRequest.IID, "source_branch", mergeRequest.SourceBranch)
+		if pullRequest == nil && !strings.EqualFold(string(giteaPullRequest.State), string(gitea.StateOpen)) {
+			logger.Trace("searching for existing branch for closed/merged pull request", "repo", giteaPath[1], "owner", giteaPath[0], "repository_id", giteaRepository.ID, "pull_request_id", giteaPullRequest.ID, "source_branch", giteaPullRequest.Head.Ref)
 
 			// Create a worktree
-			worktree, err := repo.Worktree()
+			worktree, err := gitRepo.Worktree()
 			if err != nil {
 				sendErr(fmt.Errorf("creating worktree: %v", err))
 				failureCount++
@@ -860,40 +820,41 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, d
 			}
 
 			// Generate temporary branch names
-			mergeRequest.SourceBranch = sourceBranchForClosedMergeRequest
-			mergeRequest.TargetBranch = targetBranchForClosedMergeRequest
+			giteaPullRequest.Head.Ref = sourceBranchForClosedPullRequest
+			giteaPullRequest.Base.Ref = targetBranchForClosedPullRequest
 
-			logger.Trace("retrieving commits for merge request", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID, "merge_request_id", mergeRequest.IID)
-			mergeRequestCommits, _, err := gl.MergeRequests.GetMergeRequestCommits(project.ID, mergeRequest.IID, &gitlab.GetMergeRequestCommitsOptions{OrderBy: "created_at", Sort: "asc"})
+			logger.Trace("retrieving commits for merge request", "repo", giteaPath[1], "owner", giteaPath[0], "repository_id", giteaRepository.ID, "pull_request_id", giteaPullRequest.ID)
+			giteaPullRequestCommits, _, err := gi.ListPullRequestCommits(giteaPath[0], giteaPath[1], giteaPullRequest.ID, gitea.ListPullRequestCommitsOptions{})
+			// TODO: Use "link" header to collect all available pages
 			if err != nil {
-				sendErr(fmt.Errorf("retrieving merge request commits: %v", err))
+				sendErr(fmt.Errorf("retrieving pull request commits: %v", err))
 				failureCount++
 				continue
 			}
 
-			// Some merge requests have no commits, disregard these
-			if len(mergeRequestCommits) == 0 {
+			// Some pull requests have no commits, disregard these
+			if len(giteaPullRequestCommits) == 0 {
 				continue
 			}
 
 			// API is buggy, ordering is not respected, so we'll reorder by commit datestamp
-			sort.Slice(mergeRequestCommits, func(i, j int) bool {
-				return mergeRequestCommits[i].CommittedDate.Before(*mergeRequestCommits[j].CommittedDate)
+			sort.Slice(giteaPullRequestCommits, func(i, j int) bool {
+				return giteaPullRequestCommits[i].Created.Before(giteaPullRequestCommits[j].Created)
 			})
 
-			if mergeRequestCommits[0] == nil {
-				sendErr(fmt.Errorf("start commit for merge request %d is nil", mergeRequest.IID))
+			if giteaPullRequestCommits[0] == nil {
+				sendErr(fmt.Errorf("start commit for pull request %d is nil", giteaPullRequest.ID))
 				failureCount++
 				continue
 			}
-			if mergeRequestCommits[len(mergeRequestCommits)-1] == nil {
-				sendErr(fmt.Errorf("end commit for merge request %d is nil", mergeRequest.IID))
+			if giteaPullRequestCommits[len(giteaPullRequestCommits)-1] == nil {
+				sendErr(fmt.Errorf("end commit for pull request %d is nil", giteaPullRequest.ID))
 				failureCount++
 				continue
 			}
 
-			logger.Trace("inspecting start commit", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID, "merge_request_id", mergeRequest.IID, "sha", mergeRequestCommits[0].ShortID)
-			startCommit, err := object.GetCommit(repo.Storer, plumbing.NewHash(mergeRequestCommits[0].ID))
+			logger.Trace("inspecting start commit", "repo", giteaPath[1], "owner", giteaPath[0], "repository_id", giteaRepository.ID, "pull_request_id", giteaPullRequest.ID, "sha", giteaPullRequestCommits[0].SHA)
+			startCommit, err := object.GetCommit(gitRepo.Storer, plumbing.NewHash(giteaPullRequestCommits[0].SHA))
 			if err != nil {
 				sendErr(fmt.Errorf("loading start commit: %v", err))
 				failureCount++
@@ -906,13 +867,13 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, d
 				//if err = repo.Storer.SetReference(plumbing.NewSymbolicReference("HEAD", plumbing.ReferenceName(fmt.Sprintf("refs/heads/%s", mergeRequest.TargetBranch)))); err != nil {
 				//	return fmt.Errorf("creating empty branch: %s", err)
 				//}
-				sendErr(fmt.Errorf("start commit %s for merge request %d has no parents", mergeRequestCommits[0].ShortID, mergeRequest.IID))
+				sendErr(fmt.Errorf("start commit %s for pull request %d has no parents", giteaPullRequestCommits[0].SHA, giteaPullRequest.ID))
 				continue
 			} else {
 				// Sometimes we will be starting from a merge commit, so look for a suitable parent commit to branch out from
 				var startCommitParent *object.Commit
 				for i := 0; i < startCommit.NumParents(); i++ {
-					logger.Trace("inspecting start commit parent", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID, "merge_request_id", mergeRequest.IID, "sha", mergeRequestCommits[0].ShortID)
+					logger.Trace("inspecting start commit parent", "repo", giteaPath[1], "owner", giteaPath[0], "repository_id", giteaRepository.ID, "pull_request_id", giteaPullRequest.ID, "sha", giteaPullRequestCommits[0].SHA)
 					startCommitParent, err = startCommit.Parent(0)
 					if err != nil {
 						sendErr(fmt.Errorf("loading parent commit: %s", err))
@@ -922,15 +883,15 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, d
 				}
 
 				if startCommitParent == nil {
-					sendErr(fmt.Errorf("identifying suitable parent of start commit %s for merge request %d", mergeRequestCommits[0].ShortID, mergeRequest.IID))
+					sendErr(fmt.Errorf("identifying suitable parent of start commit %s for pull request %d", giteaPullRequestCommits[0].SHA, giteaPullRequest.ID))
 					failureCount++
 				}
 
-				logger.Trace("creating target branch for merged/closed merge request", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID, "merge_request_id", mergeRequest.IID, "branch", mergeRequest.TargetBranch, "sha", startCommitParent.Hash)
+				logger.Trace("creating target branch for merged/closed pull request", "repo", giteaPath[1], "owner", giteaPath[0], "repository_id", giteaRepository.ID, "pull_request_id", giteaPullRequest.ID, "branch", giteaPullRequest.Base.Ref, "sha", startCommitParent.Hash)
 				if err = worktree.Checkout(&git.CheckoutOptions{
 					Create: true,
 					Force:  true,
-					Branch: plumbing.NewBranchReferenceName(mergeRequest.TargetBranch),
+					Branch: plumbing.NewBranchReferenceName(giteaPullRequest.Base.Ref),
 					Hash:   startCommitParent.Hash,
 				}); err != nil {
 					sendErr(fmt.Errorf("checking out temporary target branch: %v", err))
@@ -939,12 +900,12 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, d
 				}
 			}
 
-			endHash := plumbing.NewHash(mergeRequestCommits[len(mergeRequestCommits)-1].ID)
-			logger.Trace("creating source branch for merged/closed merge request", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID, "merge_request_id", mergeRequest.IID, "branch", mergeRequest.SourceBranch, "sha", endHash)
+			endHash := plumbing.NewHash(giteaPullRequestCommits[len(giteaPullRequestCommits)-1].SHA)
+			logger.Trace("creating source branch for merged/closed pull request", "repo", giteaPath[1], "owner", giteaPath[0], "repository_id", giteaRepository.ID, "pull_request_id", giteaPullRequest.ID, "branch", giteaPullRequest.Head.Ref, "sha", endHash)
 			if err = worktree.Checkout(&git.CheckoutOptions{
 				Create: true,
 				Force:  true,
-				Branch: plumbing.NewBranchReferenceName(mergeRequest.SourceBranch),
+				Branch: plumbing.NewBranchReferenceName(giteaPullRequest.Head.Ref),
 				Hash:   endHash,
 			}); err != nil {
 				sendErr(fmt.Errorf("checking out temporary source branch: %v", err))
@@ -952,17 +913,17 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, d
 				continue
 			}
 
-			logger.Debug("pushing branches for merged/closed merge request", "owner", githubPath[0], "repo", githubPath[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
-			if err = repo.PushContext(ctx, &git.PushOptions{
+			logger.Debug("pushing branches for merged/closed pull request", "owner", githubPath[0], "repo", githubPath[1], "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
+			if err = gitRepo.PushContext(ctx, &git.PushOptions{
 				RemoteName: "github",
 				RefSpecs: []config.RefSpec{
-					config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", mergeRequest.SourceBranch)),
-					config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", mergeRequest.TargetBranch)),
+					config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", giteaPullRequest.Head.Ref)),
+					config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", giteaPullRequest.Base.Ref)),
 				},
 				Force: true,
 			}); err != nil {
 				if errors.Is(err, git.NoErrAlreadyUpToDate) {
-					logger.Trace("branch already exists and is up-to-date on GitHub", "owner", githubPath[0], "repo", githubPath[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
+					logger.Trace("branch already exists and is up-to-date on GitHub", "owner", githubPath[0], "repo", githubPath[1], "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
 				} else {
 					sendErr(fmt.Errorf("pushing temporary branches to github: %v", err))
 					failureCount++
@@ -974,45 +935,45 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, d
 			cleanUpBranch = true
 		}
 
-		if defaultBranch != project.DefaultBranch && mergeRequest.TargetBranch == project.DefaultBranch {
-			logger.Trace("changing target trunk branch", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID, "merge_request_id", mergeRequest.IID, "old_trunk", project.DefaultBranch, "new_trunk", defaultBranch)
-			mergeRequest.TargetBranch = defaultBranch
+		if defaultBranch != giteaRepository.DefaultBranch && giteaPullRequest.Base.Ref == giteaRepository.DefaultBranch {
+			logger.Trace("changing target trunk branch", "repo", giteaPath[1], "owner", giteaPath[0], "repository_id", giteaRepository.ID, "pull_request_id", giteaPullRequest.ID, "old_trunk", giteaRepository.DefaultBranch, "new_trunk", defaultBranch)
+			giteaPullRequest.Base.Ref = defaultBranch
 		}
 
-		githubAuthorName := mergeRequest.Author.Name
+		githubAuthorName := giteaPullRequest.Poster.LoginName
 
-		author, err := getGitlabUser(mergeRequest.Author.Username)
+		// TODO: Check if needed
+		author, err := getGiteaUser(giteaPullRequest.Poster.LoginName)
 		if err != nil {
-			sendErr(fmt.Errorf("retrieving gitlab user: %v", err))
+			sendErr(fmt.Errorf("retrieving gitea user: %v", err))
 			failureCount++
 			continue
 		}
-		if author.WebsiteURL != "" {
-			githubAuthorName = "@" + strings.TrimPrefix(strings.ToLower(author.WebsiteURL), "https://github.com/")
+		if author.Website != "" {
+			// TODO: Support enterprise GitHub website URL
+			// TODO: What?
+			githubAuthorName = "@" + strings.TrimPrefix(strings.ToLower(author.Website), "https://github.com/")
 		}
 
 		originalState := ""
-		if !strings.EqualFold(mergeRequest.State, "opened") {
-			originalState = fmt.Sprintf("> This merge request was originally **%s** on GitLab", mergeRequest.State)
+		if !strings.EqualFold(string(giteaPullRequest.State), string(gitea.StateOpen)) {
+			originalState = fmt.Sprintf("> This pull request was originally **%s** on Gitea", giteaPullRequest.State)
 		}
 
-		logger.Debug("determining merge request approvers", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID, "merge_request_id", mergeRequest.IID)
+		logger.Debug("determining pull request approvers", "repo", giteaPath[1], "owner", giteaPath[0], "repository_id", giteaRepository.ID, "pull_request_id", giteaPullRequest.ID)
 		approvers := make([]string, 0)
-		awards, _, err := gl.AwardEmoji.ListMergeRequestAwardEmoji(project.ID, mergeRequest.IID, &gitlab.ListAwardEmojiOptions{PerPage: 100})
+		reviews, _, err := gi.ListPullReviews(giteaPath[0], giteaPath[1], giteaPullRequest.ID, gitea.ListPullReviewsOptions{})
 		if err != nil {
-			sendErr(fmt.Errorf("listing merge request awards: %v", err))
+			sendErr(fmt.Errorf("listing pull request reviews: %v", err))
 		} else {
-			for _, award := range awards {
-				if award.Name == "thumbsup" {
-					approver := award.User.Name
+			for _, review := range reviews {
+				if review.State == gitea.ReviewStateApproved {
+					approver := review.Reviewer.LoginName
 
-					approverUser, err := getGitlabUser(award.User.Username)
-					if err != nil {
-						sendErr(fmt.Errorf("retrieving gitlab user: %v", err))
-						continue
-					}
-					if approverUser.WebsiteURL != "" {
-						approver = "@" + strings.TrimPrefix(strings.ToLower(approverUser.WebsiteURL), "https://github.com/")
+					if review.Reviewer.Website != "" {
+						// TODO: Support enterprise GitHub website URL
+						// TODO: What?
+						approver = "@" + strings.TrimPrefix(strings.ToLower(review.Reviewer.Website), "https://github.com/")
 					}
 
 					approvers = append(approvers, approver)
@@ -1020,7 +981,7 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, d
 			}
 		}
 
-		description := mergeRequest.Description
+		description := giteaPullRequest.Body
 		if strings.TrimSpace(description) == "" {
 			description = "_No description_"
 		}
@@ -1032,45 +993,45 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, d
 		}
 
 		closeDate := ""
-		if mergeRequest.State == "closed" && mergeRequest.ClosedAt != nil {
-			closeDate = fmt.Sprintf("\n> | **Date Originally Closed** | %s |", mergeRequest.ClosedAt.Format(dateFormat))
-		} else if mergeRequest.State == "merged" && mergeRequest.MergedAt != nil {
-			closeDate = fmt.Sprintf("\n> | **Date Originally Merged** | %s |", mergeRequest.MergedAt.Format(dateFormat))
+		if giteaPullRequest.State == gitea.StateClosed && giteaPullRequest.Closed != nil {
+			closeDate = fmt.Sprintf("\n> | **Date Originally Closed** | %s |", giteaPullRequest.Closed.Format(dateFormat))
+		} else if giteaPullRequest.HasMerged && giteaPullRequest.Merged != nil {
+			closeDate = fmt.Sprintf("\n> | **Date Originally Merged** | %s |", giteaPullRequest.Merged.Format(dateFormat))
 		}
 
-		mergeRequestTitle := mergeRequest.Title
+		mergeRequestTitle := giteaPullRequest.Title
 		if len(mergeRequestTitle) > 40 {
 			mergeRequestTitle = mergeRequestTitle[:40] + "..."
 		}
 
 		body := fmt.Sprintf(`> [!NOTE]
-> This pull request was migrated from GitLab
+> This pull request was migrated from Gitea
 >
 > |      |      |
 > | ---- | ---- |
 > | **Original Author** | %[1]s |
-> | **GitLab Project** | [%[4]s/%[5]s](https://%[10]s/%[4]s/%[5]s) |
-> | **GitLab Merge Request** | [%[11]s](https://%[10]s/%[4]s/%[5]s/merge_requests/%[2]d) |
-> | **GitLab MR Number** | [%[2]d](https://%[10]s/%[4]s/%[5]s/merge_requests/%[2]d) |
+> | **Gitea Repository** | [%[4]s/%[5]s](https://%[10]s/%[4]s/%[5]s) |
+> | **Gitea Pull Request** | [%[11]s](https://%[10]s/%[4]s/%[5]s/merge_requests/%[2]d) |
+> | **Gitea PR Number** | [%[2]d](https://%[10]s/%[4]s/%[5]s/merge_requests/%[2]d) |
 > | **Date Originally Opened** | %[6]s |%[7]s
-> | **Approved on GitLab by** | %[8]s |
+> | **Approved on Gitea by** | %[8]s |
 > |      |      |
 >
 %[9]s
 
 ## Original Description
 
-%[3]s`, githubAuthorName, mergeRequest.IID, description, gitlabPath[0], gitlabPath[1], mergeRequest.CreatedAt.Format(dateFormat), closeDate, approval, originalState, gitlabDomain, mergeRequestTitle)
+%[3]s`, githubAuthorName, giteaPullRequest.ID, description, giteaPath[0], giteaPath[1], giteaPullRequest.Created.Format(dateFormat), closeDate, approval, originalState, giteaDomain, mergeRequestTitle)
 
 		if pullRequest == nil {
-			logger.Info("creating pull request", "owner", githubPath[0], "repo", githubPath[1], "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
+			logger.Info("creating pull request", "owner", githubPath[0], "repo", githubPath[1], "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
 			newPullRequest := github.NewPullRequest{
-				Title:               &mergeRequest.Title,
-				Head:                &mergeRequest.SourceBranch,
-				Base:                &mergeRequest.TargetBranch,
+				Title:               &giteaPullRequest.Title,
+				Head:                &giteaPullRequest.Head.Ref,
+				Base:                &giteaPullRequest.Base.Ref,
 				Body:                &body,
 				MaintainerCanModify: pointer(true),
-				Draft:               &mergeRequest.Draft,
+				Draft:               &giteaPullRequest.Draft,
 			}
 			if pullRequest, _, err = gh.PullRequests.Create(ctx, githubPath[0], githubPath[1], &newPullRequest); err != nil {
 				sendErr(fmt.Errorf("creating pull request: %v", err))
@@ -1078,7 +1039,7 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, d
 				continue
 			}
 
-			if mergeRequest.State == "closed" || mergeRequest.State == "merged" {
+			if giteaPullRequest.State == gitea.StateClosed || giteaPullRequest.HasMerged {
 				logger.Debug("closing pull request", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber())
 
 				pullRequest.State = pointer("closed")
@@ -1091,7 +1052,7 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, d
 
 		} else {
 			var newState *string
-			switch mergeRequest.State {
+			switch giteaPullRequest.State {
 			case "opened":
 				newState = pointer("open")
 			case "closed", "merged":
@@ -1112,14 +1073,14 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, d
 			}
 
 			if (newState != nil && (pullRequest.State == nil || *pullRequest.State != *newState)) ||
-				(pullRequest.Title == nil || *pullRequest.Title != mergeRequest.Title) ||
+				(pullRequest.Title == nil || *pullRequest.Title != giteaPullRequest.Title) ||
 				(pullRequest.Body == nil || *pullRequest.Body != body) ||
-				(pullRequest.Draft == nil || *pullRequest.Draft != mergeRequest.Draft) {
+				(pullRequest.Draft == nil || *pullRequest.Draft != giteaPullRequest.Draft) {
 				logger.Info("updating pull request", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber())
 
-				pullRequest.Title = &mergeRequest.Title
+				pullRequest.Title = &giteaPullRequest.Title
 				pullRequest.Body = &body
-				pullRequest.Draft = &mergeRequest.Draft
+				pullRequest.Draft = &giteaPullRequest.Draft
 				pullRequest.MaintainerCanModify = nil
 				if pullRequest, _, err = gh.PullRequests.Edit(ctx, githubPath[0], githubPath[1], pullRequest.GetNumber(), pullRequest); err != nil {
 					sendErr(fmt.Errorf("updating pull request: %v", err))
@@ -1132,17 +1093,17 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, d
 		}
 
 		if cleanUpBranch {
-			logger.Debug("deleting temporary branches for closed pull request", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber(), "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
-			if err = repo.PushContext(ctx, &git.PushOptions{
+			logger.Debug("deleting temporary branches for closed pull request", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber(), "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
+			if err = gitRepo.PushContext(ctx, &git.PushOptions{
 				RemoteName: "github",
 				RefSpecs: []config.RefSpec{
-					config.RefSpec(fmt.Sprintf(":refs/heads/%s", mergeRequest.SourceBranch)),
-					config.RefSpec(fmt.Sprintf(":refs/heads/%s", mergeRequest.TargetBranch)),
+					config.RefSpec(fmt.Sprintf(":refs/heads/%s", giteaPullRequest.Head.Ref)),
+					config.RefSpec(fmt.Sprintf(":refs/heads/%s", giteaPullRequest.Base.Ref)),
 				},
 				Force: true,
 			}); err != nil {
 				if errors.Is(err, git.NoErrAlreadyUpToDate) {
-					logger.Trace("branches already deleted on GitHub", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber(), "source_branch", mergeRequest.SourceBranch, "target_branch", mergeRequest.TargetBranch)
+					logger.Trace("branches already deleted on GitHub", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber(), "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
 				} else {
 					sendErr(fmt.Errorf("pushing branch deletions to github: %v", err))
 					failureCount++
@@ -1151,18 +1112,15 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, d
 			}
 		}
 
-		var comments []*gitlab.Note
+		var comments []*gitea.Comment
 		skipComments := false
-		opts := &gitlab.ListMergeRequestNotesOptions{
-			OrderBy: pointer("created_at"),
-			Sort:    pointer("asc"),
-		}
+		opts := &gitea.ListIssueCommentOptions{}
 
-		logger.Debug("retrieving GitLab merge request comments", "name", gitlabPath[1], "group", gitlabPath[0], "project_id", project.ID, "merge_request_id", mergeRequest.IID)
+		logger.Debug("retrieving Gitea pull request comments", "repo", giteaPath[1], "owner", giteaPath[0], "repository_id", giteaRepository.ID, "pull_request_id", giteaPullRequest.ID)
 		for {
-			result, resp, err := gl.Notes.ListMergeRequestNotes(project.ID, mergeRequest.IID, opts)
+			result, resp, err := gi.ListIssueComments(giteaPath[0], giteaPath[1], giteaPullRequest.ID, gitea.ListIssueCommentOptions{})
 			if err != nil {
-				sendErr(fmt.Errorf("listing merge request notes: %v", err))
+				sendErr(fmt.Errorf("listing gitea pull request comments: %v", err))
 				skipComments = true
 				break
 			}
@@ -1182,41 +1140,43 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, d
 			logger.Debug("retrieving GitHub pull request comments", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber())
 			prComments, _, err := gh.Issues.ListComments(ctx, githubPath[0], githubPath[1], pullRequest.GetNumber(), &github.IssueListCommentsOptions{Sort: pointer("created"), Direction: pointer("asc")})
 			if err != nil {
-				sendErr(fmt.Errorf("listing pull request comments: %v", err))
+				sendErr(fmt.Errorf("listing github pull request comments: %v", err))
 			} else {
-				logger.Info("migrating merge request comments from GitLab to GitHub", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber(), "count", len(comments))
+				logger.Info("migrating pull request comments from Gitea to GitHub", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber(), "count", len(comments))
 
 				for _, comment := range comments {
-					if comment == nil || comment.System {
+					if comment == nil {
 						continue
 					}
 
-					githubCommentAuthorName := comment.Author.Name
+					githubCommentAuthorName := comment.Poster.LoginName
 
-					commentAuthor, err := getGitlabUser(comment.Author.Username)
+					commentAuthor, err := getGiteaUser(comment.Poster.LoginName)
 					if err != nil {
-						sendErr(fmt.Errorf("retrieving gitlab user: %v", err))
+						sendErr(fmt.Errorf("retrieving gitea user: %v", err))
 						failureCount++
 						break
 					}
-					if commentAuthor.WebsiteURL != "" {
-						githubCommentAuthorName = "@" + strings.TrimPrefix(strings.ToLower(commentAuthor.WebsiteURL), "https://github.com/")
+					if commentAuthor.Website != "" {
+						// TODO: Support enterprise GitHub website URL
+						// TODO: What?
+						githubCommentAuthorName = "@" + strings.TrimPrefix(strings.ToLower(commentAuthor.Website), "https://github.com/")
 					}
 
 					commentBody := fmt.Sprintf(`> [!NOTE]
-> This comment was migrated from GitLab
+> This comment was migrated from Gitea
 >
 > |      |      |
 > | ---- | ---- |
 > | **Original Author** | %[1]s |
-> | **Note ID** | %[2]d |
+> | **Comment ID** | %[2]d |
 > | **Date Originally Created** | %[3]s |
 > |      |      |
 >
 
 ## Original Comment
 
-%[4]s`, githubCommentAuthorName, comment.ID, comment.CreatedAt.Format("Mon, 2 Jan 2006"), comment.Body)
+%[4]s`, githubCommentAuthorName, comment.ID, comment.Created.Format(dateFormat), comment.Body)
 
 					foundExistingComment := false
 					for _, prComment := range prComments {
@@ -1224,7 +1184,7 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, d
 							continue
 						}
 
-						if strings.Contains(prComment.GetBody(), fmt.Sprintf("**Note ID** | %d", comment.ID)) {
+						if strings.Contains(prComment.GetBody(), fmt.Sprintf("**Comment ID** | %d", comment.ID)) {
 							foundExistingComment = true
 
 							if prComment.Body == nil || *prComment.Body != commentBody {
@@ -1261,5 +1221,5 @@ func migratePullRequests(ctx context.Context, githubPath, gitlabPath []string, d
 
 	skippedCount := totalCount - successCount - failureCount
 
-	logger.Info("migrated merge requests from GitLab to GitHub", "name", gitlabPath[1], "group", gitlabPath[0], "successful", successCount, "failed", failureCount, "skipped", skippedCount)
+	logger.Info("migrated merge requests from Gitea to GitHub", "repo", giteaPath[1], "owner", giteaPath[0], "successful", successCount, "failed", failureCount, "skipped", skippedCount)
 }

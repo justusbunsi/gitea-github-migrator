@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"code.gitea.io/sdk/gitea"
 	"github.com/google/go-github/v74/github"
-	"github.com/xanzy/go-gitlab"
 )
 
 func getGithubPullRequest(ctx context.Context, org, repo string, prNumber int) (*github.PullRequest, error) {
@@ -76,25 +76,26 @@ func getGithubUser(ctx context.Context, username string) (*github.User, error) {
 	return user, nil
 }
 
-func getGitlabUser(username string) (*gitlab.User, error) {
-	user := cache.getGitlabUser(username)
+// TODO: unify getGiteaUser and getGiteaOrganization
+func getGiteaUser(username string) (*gitea.User, error) {
+	user := cache.getGiteaUser(username)
 	if user == nil {
 		logger.Debug("retrieving user details", "username", username)
-		users, _, err := gl.Users.ListUsers(&gitlab.ListUsersOptions{Username: &username})
+		users, _, err := gi.AdminListUsers(gitea.AdminListUsersOptions{})
 		if err != nil {
 			return nil, err
 		}
 
 		for _, user = range users {
-			if user != nil && user.Username == username {
-				logger.Trace("caching GitLab user", "username", username)
-				cache.setGitlabUser(username, *user)
+			if user != nil && user.UserName == username {
+				logger.Trace("caching Gitea user", "username", username)
+				cache.setGiteaUser(username, *user)
 
 				return user, nil
 			}
 		}
 
-		return nil, fmt.Errorf("GitLab user not found: %s", username)
+		return nil, fmt.Errorf("gitea user not found: %s", username)
 	}
 
 	return user, nil
