@@ -940,10 +940,10 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 			giteaPullRequest.Base.Ref = defaultBranch
 		}
 
-		githubAuthorName := giteaPullRequest.Poster.LoginName
+		githubAuthorName := giteaPullRequest.Poster.UserName
 
 		// TODO: Check if needed
-		author, err := getGiteaUser(giteaPullRequest.Poster.LoginName)
+		author, err := getGiteaUser(giteaPullRequest.Poster.UserName)
 		if err != nil {
 			sendErr(fmt.Errorf("retrieving gitea user: %v", err))
 			failureCount++
@@ -1149,9 +1149,9 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 						continue
 					}
 
-					githubCommentAuthorName := comment.Poster.LoginName
+					githubCommentAuthorName := comment.Poster.UserName
 
-					commentAuthor, err := getGiteaUser(comment.Poster.LoginName)
+					commentAuthor, err := getGiteaUser(comment.Poster.UserName)
 					if err != nil {
 						sendErr(fmt.Errorf("retrieving gitea user: %v", err))
 						failureCount++

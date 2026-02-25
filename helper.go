@@ -76,14 +76,27 @@ func getGithubUser(ctx context.Context, username string) (*github.User, error) {
 	return user, nil
 }
 
+// TODO: pre-cache user list result to reduce overall Gitea API requests
 // TODO: unify getGiteaUser and getGiteaOrganization
 func getGiteaUser(username string) (*gitea.User, error) {
 	user := cache.getGiteaUser(username)
 	if user == nil {
 		logger.Debug("retrieving user details", "username", username)
-		users, _, err := gi.AdminListUsers(gitea.AdminListUsersOptions{})
-		if err != nil {
-			return nil, err
+		var users []*gitea.User
+		opts := gitea.AdminListUsersOptions{}
+		for {
+			result, resp, err := gi.AdminListUsers(opts)
+			if err != nil {
+				return nil, fmt.Errorf("retrieving gitea user list: %v", err)
+			}
+
+			users = append(users, result...)
+
+			if resp.NextPage == 0 {
+				break
+			}
+
+			opts.ListOptions.Page = resp.NextPage
 		}
 
 		for _, user = range users {
