@@ -40,6 +40,7 @@ const (
 	dateFormat          = "Mon, 2 Jan 2006"
 	defaultGithubDomain = "github.com"
 	defaultGiteaDomain  = "gitea.com"
+	githubBodyLimit     = 58000
 )
 
 var loop, report bool
@@ -999,11 +1000,6 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 			closeDate = fmt.Sprintf("\n> | **Date Originally Merged** | %s |", giteaPullRequest.Merged.Format(dateFormat))
 		}
 
-		mergeRequestTitle := giteaPullRequest.Title
-		if len(mergeRequestTitle) > 40 {
-			mergeRequestTitle = mergeRequestTitle[:40] + "..."
-		}
-
 		body := fmt.Sprintf(`> [!NOTE]
 > This pull request was migrated from Gitea
 >
@@ -1021,7 +1017,12 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 
 ## Original Description
 
-%[3]s`, githubAuthorName, giteaPullRequest.Index, description, giteaPath[0], giteaPath[1], giteaPullRequest.Created.Format(dateFormat), closeDate, approval, originalState, giteaDomain, mergeRequestTitle)
+%[3]s`, githubAuthorName, giteaPullRequest.Index, description, giteaPath[0], giteaPath[1], giteaPullRequest.Created.Format(dateFormat), closeDate, approval, originalState, giteaDomain, giteaPullRequest.Title)
+
+		if len(body) > githubBodyLimit {
+			logger.Warn("pull request body was truncated due to platform limits", "owner", githubPath[0], "repo", githubPath[1], "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
+			body = smartRenovateBodyTruncate(body)
+		}
 
 		if pullRequest == nil {
 			logger.Info("creating pull request", "owner", githubPath[0], "repo", githubPath[1], "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
@@ -1177,6 +1178,11 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 ## Original Comment
 
 %[4]s`, githubCommentAuthorName, comment.ID, comment.Created.Format(dateFormat), comment.Body)
+					if len(commentBody) > githubBodyLimit {
+						logger.Warn("pull request comment was truncated due to platform limits", "owner", githubPath[0], "repo", githubPath[1], "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref, "comment_id", comment.ID)
+						commentBody = strings.ReplaceAll(commentBody, "This comment was migrated from Gitea", "This comment was migrated from Gitea **and was truncated due to platform limits**")
+						commentBody = commentBody[:githubBodyLimit] + "..."
+					}
 
 					foundExistingComment := false
 					for _, prComment := range prComments {
@@ -1222,4 +1228,27 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 	skippedCount := totalCount - successCount - failureCount
 
 	logger.Info("migrated merge requests from Gitea to GitHub", "repo", giteaPath[1], "owner", giteaPath[0], "successful", successCount, "failed", failureCount, "skipped", skippedCount)
+}
+
+// smartRenovateBodyTruncate considers too-long-to-handle Pull Requests as created by Renovate.
+// Those Pull Requests tend to exceed the limit by providing a very large "Release Notes" section.
+// To mitigate migration errors, we truncate those body contents similar to how Renovate handles the limit.
+// See https://github.com/renovatebot/renovate/blob/bd7214d04be0cc5ea7a4ddd8f6b214d5af19b707/lib/modules/platform/github/index.ts#L110 and https://github.com/renovatebot/renovate/blob/bd7214d04be0cc5ea7a4ddd8f6b214d5af19b707/lib/modules/platform/utils/pr-body.ts#L10.
+// In case the hard-coded Renovate regex does not match, the original input is being hard-limit truncated at the end.
+func smartRenovateBodyTruncate(str string) string {
+	r := regexp.MustCompile(`(?ms)(?P<preNotes>.*### Release Notes)(?P<releaseNotes>.*\n\n</details>\n\n---\n\n)(?P<postNotes>.*)`)
+	str = strings.ReplaceAll(str, "This pull request was migrated from Gitea", "This pull request was migrated from Gitea **and the description was truncated due to platform limits**")
+	matches := r.FindStringSubmatch(str)
+	if matches == nil {
+		return str[:githubBodyLimit] + "..."
+	}
+	divider := "\n\n</details>\n\n---\n\n"
+	preNotes := matches[r.SubexpIndex("preNotes")]
+	releaseNotes := matches[r.SubexpIndex("releaseNotes")]
+	postNotes := matches[r.SubexpIndex("postNotes")]
+	availableLength := githubBodyLimit - (len(preNotes) + len(postNotes) + len(divider))
+	if availableLength <= 0 {
+		return str[:githubBodyLimit] + "..."
+	}
+	return fmt.Sprintf("%s%s%s%s", preNotes, releaseNotes[:availableLength], divider, postNotes)
 }
