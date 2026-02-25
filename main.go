@@ -1011,8 +1011,8 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 > | ---- | ---- |
 > | **Original Author** | %[1]s |
 > | **Gitea Repository** | [%[4]s/%[5]s](https://%[10]s/%[4]s/%[5]s) |
-> | **Gitea Pull Request** | [%[11]s](https://%[10]s/%[4]s/%[5]s/merge_requests/%[2]d) |
-> | **Gitea PR Number** | [%[2]d](https://%[10]s/%[4]s/%[5]s/merge_requests/%[2]d) |
+> | **Gitea Pull Request** | [%[11]s](https://%[10]s/%[4]s/%[5]s/pulls/%[2]d) |
+> | **Gitea PR Number** | [%[2]d](https://%[10]s/%[4]s/%[5]s/pulls/%[2]d) |
 > | **Date Originally Opened** | %[6]s |%[7]s
 > | **Approved on Gitea by** | %[8]s |
 > |      |      |
