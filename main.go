@@ -958,7 +958,11 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 
 		originalState := ""
 		if !strings.EqualFold(string(giteaPullRequest.State), string(gitea.StateOpen)) {
-			originalState = fmt.Sprintf("> This pull request was originally **%s** on Gitea", giteaPullRequest.State)
+			if giteaPullRequest.HasMerged && giteaPullRequest.Merged != nil {
+				originalState = fmt.Sprintf("> This pull request was originally **merged** on Gitea")
+			} else {
+				originalState = fmt.Sprintf("> This pull request was originally **closed** on Gitea")
+			}
 		}
 
 		logger.Debug("determining pull request approvers", "repo", giteaPath[1], "owner", giteaPath[0], "repository_id", giteaRepository.ID, "pull_request_id", giteaPullRequest.Index)
@@ -969,7 +973,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 		} else {
 			for _, review := range reviews {
 				if review.State == gitea.ReviewStateApproved {
-					approver := review.Reviewer.LoginName
+					approver := review.Reviewer.UserName
 
 					if review.Reviewer.Website != "" {
 						// TODO: Support enterprise GitHub website URL
@@ -993,11 +997,13 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 			approval = "_No approvers_"
 		}
 
-		closeDate := ""
-		if giteaPullRequest.State == gitea.StateClosed && giteaPullRequest.Closed != nil {
-			closeDate = fmt.Sprintf("\n> | **Date Originally Closed** | %s |", giteaPullRequest.Closed.Format(dateFormat))
-		} else if giteaPullRequest.HasMerged && giteaPullRequest.Merged != nil {
-			closeDate = fmt.Sprintf("\n> | **Date Originally Merged** | %s |", giteaPullRequest.Merged.Format(dateFormat))
+		closeDetails := ""
+		if giteaPullRequest.State == gitea.StateClosed {
+			if giteaPullRequest.HasMerged && giteaPullRequest.Merged != nil {
+				closeDetails = fmt.Sprintf("\n> | **Date Originally Merged** | %s |\n> | **Original Merger** | %s |\n> | **Merge Commit** | %s |", giteaPullRequest.Merged.Format(dateFormat), giteaPullRequest.MergedBy.UserName, *giteaPullRequest.MergedCommitID)
+			} else if giteaPullRequest.Closed != nil {
+				closeDetails = fmt.Sprintf("\n> | **Date Originally Closed** | %s |", giteaPullRequest.Closed.Format(dateFormat))
+			}
 		}
 
 		body := fmt.Sprintf(`> [!NOTE]
@@ -1017,7 +1023,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 
 ## Original Description
 
-%[3]s`, githubAuthorName, giteaPullRequest.Index, description, giteaPath[0], giteaPath[1], giteaPullRequest.Created.Format(dateFormat), closeDate, approval, originalState, giteaDomain, giteaPullRequest.Title)
+%[3]s`, githubAuthorName, giteaPullRequest.Index, description, giteaPath[0], giteaPath[1], giteaPullRequest.Created.Format(dateFormat), closeDetails, approval, originalState, giteaDomain, giteaPullRequest.Title)
 
 		if len(body) > githubBodyLimit {
 			logger.Warn("pull request body was truncated due to platform limits", "owner", githubPath[0], "repo", githubPath[1], "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
@@ -1040,7 +1046,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 				continue
 			}
 
-			if giteaPullRequest.State == gitea.StateClosed || giteaPullRequest.HasMerged {
+			if giteaPullRequest.State == gitea.StateClosed {
 				logger.Debug("closing pull request", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber())
 
 				pullRequest.State = pointer("closed")
