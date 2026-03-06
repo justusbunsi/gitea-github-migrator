@@ -715,7 +715,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 		targetBranchForClosedPullRequest := fmt.Sprintf("migration-target-%d/%s", giteaPullRequest.Index, giteaPullRequest.Base.Ref)
 
 		var cleanUpBranch bool
-		var pullRequest *github.PullRequest // TODO: rename to githubPullRequest
+		var githubPullRequest *github.PullRequest
 
 		logger.Debug("searching for any existing pull request", "owner", githubPath[0], "repo", githubPath[1], "pr_number", giteaPullRequest.Index)
 		sourceBranches := []string{giteaPullRequest.Head.Ref, sourceBranchForClosedPullRequest}
@@ -761,7 +761,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 					if strings.Contains(ghPr.GetBody(), fmt.Sprintf("**Gitea PR Number** | %d", giteaPullRequest.Index)) ||
 						strings.Contains(ghPr.GetBody(), fmt.Sprintf("**Gitea PR Number** | [%d]", giteaPullRequest.Index)) {
 						logger.Debug("found existing pull request", "owner", githubPath[0], "repo", githubPath[1], "pr_number", ghPr.GetNumber())
-						pullRequest = ghPr
+						githubPullRequest = ghPr
 						break
 					}
 				}
@@ -772,7 +772,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 		}
 
 		// Proceed to create temporary branches when migrating a merged/closed merge request that doesn't yet have a counterpart PR in GitHub (can't create one without a branch)
-		if pullRequest == nil && !strings.EqualFold(string(giteaPullRequest.State), string(gitea.StateOpen)) {
+		if githubPullRequest == nil && !strings.EqualFold(string(giteaPullRequest.State), string(gitea.StateOpen)) {
 			logger.Trace("searching for existing branch for closed/merged pull request", "owner", giteaPath[0], "repo", giteaPath[1], "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index, "source_branch", giteaPullRequest.Head.Ref)
 
 			// Create a worktree
@@ -989,7 +989,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 			body = smartRenovateBodyTruncate(body)
 		}
 
-		if pullRequest == nil {
+		if githubPullRequest == nil {
 			logger.Info("creating pull request", "owner", githubPath[0], "repo", githubPath[1], "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
 			newPullRequest := github.NewPullRequest{
 				Title:               &giteaPullRequest.Title,
@@ -999,17 +999,17 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 				MaintainerCanModify: pointer(true),
 				Draft:               &giteaPullRequest.Draft,
 			}
-			if pullRequest, _, err = gh.PullRequests.Create(ctx, githubPath[0], githubPath[1], &newPullRequest); err != nil {
+			if githubPullRequest, _, err = gh.PullRequests.Create(ctx, githubPath[0], githubPath[1], &newPullRequest); err != nil {
 				sendErr(fmt.Errorf("creating pull request: %v", err))
 				failureCount++
 				continue
 			}
 
 			if giteaPullRequest.State == gitea.StateClosed {
-				logger.Debug("closing pull request", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber())
+				logger.Debug("closing pull request", "owner", githubPath[0], "repo", githubPath[1], "pr_number", githubPullRequest.GetNumber())
 
-				pullRequest.State = pointer("closed")
-				if pullRequest, _, err = gh.PullRequests.Edit(ctx, githubPath[0], githubPath[1], pullRequest.GetNumber(), pullRequest); err != nil {
+				githubPullRequest.State = pointer("closed")
+				if githubPullRequest, _, err = gh.PullRequests.Edit(ctx, githubPath[0], githubPath[1], githubPullRequest.GetNumber(), githubPullRequest); err != nil {
 					sendErr(fmt.Errorf("updating pull request: %v", err))
 					failureCount++
 					continue
@@ -1025,41 +1025,41 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 				newState = pointer("closed")
 			}
 
-			if pullRequest.State != nil && newState != nil && *pullRequest.State != *newState {
+			if githubPullRequest.State != nil && newState != nil && *githubPullRequest.State != *newState {
 				pullRequestState := &github.PullRequest{
-					Number: pullRequest.Number,
+					Number: githubPullRequest.Number,
 					State:  newState,
 				}
 
-				if pullRequest, _, err = gh.PullRequests.Edit(ctx, githubPath[0], githubPath[1], pullRequestState.GetNumber(), pullRequestState); err != nil {
+				if githubPullRequest, _, err = gh.PullRequests.Edit(ctx, githubPath[0], githubPath[1], pullRequestState.GetNumber(), pullRequestState); err != nil {
 					sendErr(fmt.Errorf("updating pull request state: %v", err))
 					failureCount++
 					continue
 				}
 			}
 
-			if (newState != nil && (pullRequest.State == nil || *pullRequest.State != *newState)) ||
-				(pullRequest.Title == nil || *pullRequest.Title != giteaPullRequest.Title) ||
-				(pullRequest.Body == nil || *pullRequest.Body != body) ||
-				(pullRequest.Draft == nil || *pullRequest.Draft != giteaPullRequest.Draft) {
-				logger.Info("updating pull request", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber())
+			if (newState != nil && (githubPullRequest.State == nil || *githubPullRequest.State != *newState)) ||
+				(githubPullRequest.Title == nil || *githubPullRequest.Title != giteaPullRequest.Title) ||
+				(githubPullRequest.Body == nil || *githubPullRequest.Body != body) ||
+				(githubPullRequest.Draft == nil || *githubPullRequest.Draft != giteaPullRequest.Draft) {
+				logger.Info("updating pull request", "owner", githubPath[0], "repo", githubPath[1], "pr_number", githubPullRequest.GetNumber())
 
-				pullRequest.Title = &giteaPullRequest.Title
-				pullRequest.Body = &body
-				pullRequest.Draft = &giteaPullRequest.Draft
-				pullRequest.MaintainerCanModify = nil
-				if pullRequest, _, err = gh.PullRequests.Edit(ctx, githubPath[0], githubPath[1], pullRequest.GetNumber(), pullRequest); err != nil {
+				githubPullRequest.Title = &giteaPullRequest.Title
+				githubPullRequest.Body = &body
+				githubPullRequest.Draft = &giteaPullRequest.Draft
+				githubPullRequest.MaintainerCanModify = nil
+				if githubPullRequest, _, err = gh.PullRequests.Edit(ctx, githubPath[0], githubPath[1], githubPullRequest.GetNumber(), githubPullRequest); err != nil {
 					sendErr(fmt.Errorf("updating pull request: %v", err))
 					failureCount++
 					continue
 				}
 			} else {
-				logger.Trace("existing pull request is up-to-date", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber())
+				logger.Trace("existing pull request is up-to-date", "owner", githubPath[0], "repo", githubPath[1], "pr_number", githubPullRequest.GetNumber())
 			}
 		}
 
 		if cleanUpBranch {
-			logger.Debug("deleting temporary branches for closed pull request", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber(), "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
+			logger.Debug("deleting temporary branches for closed pull request", "owner", githubPath[0], "repo", githubPath[1], "pr_number", githubPullRequest.GetNumber(), "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
 			if err = gitRepo.PushContext(ctx, &git.PushOptions{
 				RemoteName: "github",
 				RefSpecs: []config.RefSpec{
@@ -1069,7 +1069,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 				Force: true,
 			}); err != nil {
 				if errors.Is(err, git.NoErrAlreadyUpToDate) {
-					logger.Trace("branches already deleted on GitHub", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber(), "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
+					logger.Trace("branches already deleted on GitHub", "owner", githubPath[0], "repo", githubPath[1], "pr_number", githubPullRequest.GetNumber(), "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
 				} else {
 					sendErr(fmt.Errorf("pushing branch deletions to github: %v", err))
 					failureCount++
@@ -1078,7 +1078,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 			}
 		}
 
-		err = migrateItemComments(ctx, githubPath, giteaPath, giteaRepository, giteaPullRequest.Index, pullRequest.GetNumber())
+		err = migrateItemComments(ctx, githubPath, giteaPath, giteaRepository, giteaPullRequest.Index, githubPullRequest.GetNumber())
 		if err != nil {
 			sendErr(err)
 			failureCount++
