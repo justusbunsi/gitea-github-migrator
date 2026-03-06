@@ -56,7 +56,7 @@ func getGithubUser(ctx context.Context, username string) (*github.User, error) {
 	var err error
 	user := cache.getGithubUser(username)
 	if user == nil {
-		logger.Debug("retrieving user details", "username", username)
+		logger.Debug("retrieving GitHub user details", "username", username)
 		if user, _, err = gh.Users.Get(ctx, username); err != nil {
 			return nil, err
 		}
@@ -70,18 +70,15 @@ func getGithubUser(ctx context.Context, username string) (*github.User, error) {
 	}
 
 	if user.Type == nil {
-		return nil, fmt.Errorf("unable to determine whether owner is a user or organisatition: %s", username)
+		return nil, fmt.Errorf("unable to determine whether owner is a user or organisation: %s", username)
 	}
 
 	return user, nil
 }
 
-// TODO: pre-cache user list result to reduce overall Gitea API requests
-// TODO: unify getGiteaUser and getGiteaOrganization
 func getGiteaUser(username string) (*gitea.User, error) {
 	user := cache.getGiteaUser(username)
 	if user == nil {
-		logger.Debug("retrieving user details", "username", username)
 		var users []*gitea.User
 		opts := gitea.AdminListUsersOptions{}
 		for {
@@ -99,16 +96,21 @@ func getGiteaUser(username string) (*gitea.User, error) {
 			opts.ListOptions.Page = resp.NextPage
 		}
 
+		var foundUser *gitea.User
 		for _, user = range users {
-			if user != nil && user.UserName == username {
-				logger.Trace("caching Gitea user", "username", username)
-				cache.setGiteaUser(username, *user)
-
-				return user, nil
+			cache.setGiteaUser(user.UserName, *user)
+			if user.UserName == username {
+				foundUser = user
 			}
 		}
 
-		return nil, fmt.Errorf("gitea user not found: %s", username)
+		logger.Trace("pre-cached existing Gitea users", "count", len(users))
+
+		if foundUser == nil {
+			return nil, fmt.Errorf("gitea user not found: %s", username)
+		}
+
+		return foundUser, nil
 	}
 
 	return user, nil
