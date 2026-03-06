@@ -16,7 +16,6 @@ import (
 	"os/signal"
 	"regexp"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -802,10 +801,8 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 				continue
 			}
 
-			// API is buggy, ordering is not respected, so we'll reorder by commit datestamp
-			sort.Slice(giteaPullRequestCommits, func(i, j int) bool {
-				return giteaPullRequestCommits[i].Created.Before(giteaPullRequestCommits[j].Created)
-			})
+			// API returns commits from newest to oldest, we need to reverse
+			slices.Reverse(giteaPullRequestCommits)
 
 			if giteaPullRequestCommits[0] == nil {
 				sendErr(fmt.Errorf("start commit for pull request %d is nil", giteaPullRequest.Index))
