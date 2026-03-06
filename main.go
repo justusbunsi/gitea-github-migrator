@@ -1119,114 +1119,11 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 			}
 		}
 
-		var comments []*gitea.Comment
-		skipComments := false
-		opts := &gitea.ListIssueCommentOptions{}
-
-		logger.Debug("retrieving Gitea pull request comments", "repo", giteaPath[1], "owner", giteaPath[0], "repository_id", giteaRepository.ID, "pull_request_id", giteaPullRequest.Index)
-		for {
-			result, resp, err := gi.ListIssueComments(giteaPath[0], giteaPath[1], giteaPullRequest.Index, gitea.ListIssueCommentOptions{})
-			if err != nil {
-				sendErr(fmt.Errorf("listing gitea pull request comments: %v", err))
-				skipComments = true
-				break
-			}
-
-			comments = append(comments, result...)
-
-			if resp.NextPage == 0 {
-				break
-			}
-
-			opts.Page = resp.NextPage
-		}
-
-		if skipComments {
+		err = migrateItemComments(ctx, githubPath, giteaPath, giteaRepository, giteaPullRequest.Index, pullRequest.GetNumber())
+		if err != nil {
+			sendErr(err)
 			failureCount++
 		} else {
-			logger.Debug("retrieving GitHub pull request comments", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber())
-			prComments, _, err := gh.Issues.ListComments(ctx, githubPath[0], githubPath[1], pullRequest.GetNumber(), &github.IssueListCommentsOptions{Sort: pointer("created"), Direction: pointer("asc")})
-			if err != nil {
-				sendErr(fmt.Errorf("listing github pull request comments: %v", err))
-			} else {
-				logger.Info("migrating pull request comments from Gitea to GitHub", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber(), "count", len(comments))
-
-				for _, comment := range comments {
-					if comment == nil {
-						continue
-					}
-
-					githubCommentAuthorName := comment.Poster.UserName
-
-					commentAuthor, err := getGiteaUser(comment.Poster.UserName)
-					if err != nil {
-						sendErr(fmt.Errorf("retrieving gitea user: %v", err))
-						failureCount++
-						break
-					}
-					if commentAuthor.Website != "" {
-						// TODO: Support enterprise GitHub website URL
-						// TODO: What?
-						githubCommentAuthorName = "@" + strings.TrimPrefix(strings.ToLower(commentAuthor.Website), "https://github.com/")
-					}
-
-					commentBody := fmt.Sprintf(`> [!NOTE]
-> This comment was migrated from Gitea
->
-> |      |      |
-> | ---- | ---- |
-> | **Original Author** | %[1]s |
-> | **Comment ID** | %[2]d |
-> | **Date Originally Created** | %[3]s |
-> |      |      |
->
-
-## Original Comment
-
-%[4]s`, githubCommentAuthorName, comment.ID, comment.Created.Format(dateFormat), comment.Body)
-					if len(commentBody) > githubBodyLimit {
-						logger.Warn("pull request comment was truncated due to platform limits", "owner", githubPath[0], "repo", githubPath[1], "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref, "comment_id", comment.ID)
-						commentBody = strings.ReplaceAll(commentBody, "This comment was migrated from Gitea", "This comment was migrated from Gitea **and was truncated due to platform limits**")
-						commentBody = commentBody[:githubBodyLimit] + "..."
-					}
-
-					foundExistingComment := false
-					for _, prComment := range prComments {
-						if prComment == nil {
-							continue
-						}
-
-						if strings.Contains(prComment.GetBody(), fmt.Sprintf("**Comment ID** | %d", comment.ID)) {
-							foundExistingComment = true
-
-							if prComment.Body == nil || *prComment.Body != commentBody {
-								logger.Debug("updating pull request comment", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber(), "comment_id", prComment.GetID())
-								prComment.Body = &commentBody
-								if _, _, err = gh.Issues.EditComment(ctx, githubPath[0], githubPath[1], prComment.GetID(), prComment); err != nil {
-									sendErr(fmt.Errorf("updating pull request comments: %v", err))
-									failureCount++
-									break
-								}
-							}
-						} else {
-							logger.Trace("existing pull request comment is up-to-date", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber(), "comment_id", prComment.GetID())
-						}
-					}
-
-					if !foundExistingComment {
-						logger.Debug("creating pull request comment", "owner", githubPath[0], "repo", githubPath[1], "pr_number", pullRequest.GetNumber())
-						newComment := github.IssueComment{
-							Body: &commentBody,
-						}
-						if _, _, err = gh.Issues.CreateComment(ctx, githubPath[0], githubPath[1], pullRequest.GetNumber(), &newComment); err != nil {
-							sendErr(fmt.Errorf("creating pull request comment: %v", err))
-							failureCount++
-							break
-						}
-					}
-				}
-			}
-
 			successCount++
 		}
 	}
@@ -1257,4 +1154,105 @@ func smartRenovateBodyTruncate(str string) string {
 		return str[:githubBodyLimit] + "..."
 	}
 	return fmt.Sprintf("%s%s%s%s", preNotes, releaseNotes[:availableLength], divider, postNotes)
+}
+
+func migrateItemComments(ctx context.Context, githubPath, giteaPath []string, giteaRepository *gitea.Repository, giteaItemId int64, githubItemId int) error {
+	var giteaComments []*gitea.Comment
+	opts := &gitea.ListIssueCommentOptions{}
+
+	logger.Debug("retrieving Gitea comments", "repo", giteaPath[1], "owner", giteaPath[0], "repository_id", giteaRepository.ID, "item_id", giteaItemId)
+	for {
+		result, resp, err := gi.ListIssueComments(giteaPath[0], giteaPath[1], giteaItemId, gitea.ListIssueCommentOptions{})
+		if err != nil {
+			return fmt.Errorf("listing gitea comments: %v", err)
+		}
+
+		giteaComments = append(giteaComments, result...)
+
+		if resp.NextPage == 0 {
+			break
+		}
+
+		opts.Page = resp.NextPage
+	}
+
+	logger.Debug("retrieving GitHub comments", "owner", githubPath[0], "repo", githubPath[1], "item_id", githubItemId)
+	githubComments, _, err := gh.Issues.ListComments(ctx, githubPath[0], githubPath[1], githubItemId, &github.IssueListCommentsOptions{Sort: pointer("created"), Direction: pointer("asc")})
+	if err != nil {
+		return fmt.Errorf("listing github comments: %v", err)
+	}
+
+	logger.Info("migrating comments from Gitea to GitHub", "owner", githubPath[0], "repo", githubPath[1], "item_id", githubItemId, "count", len(giteaComments))
+
+	for _, comment := range giteaComments {
+		if comment == nil {
+			continue
+		}
+
+		githubCommentAuthorName := comment.Poster.UserName
+
+		commentAuthor, err := getGiteaUser(comment.Poster.UserName)
+		if err != nil {
+			return fmt.Errorf("retrieving gitea user: %v", err)
+		}
+		if commentAuthor.Website != "" {
+			// TODO: Support enterprise GitHub website URL
+			// TODO: What?
+			githubCommentAuthorName = "@" + strings.TrimPrefix(strings.ToLower(commentAuthor.Website), "https://github.com/")
+		}
+
+		commentBody := fmt.Sprintf(`> [!NOTE]
+> This comment was migrated from Gitea
+>
+> |      |      |
+> | ---- | ---- |
+> | **Original Author** | %[1]s |
+> | **Comment ID** | %[2]d |
+> | **Date Originally Created** | %[3]s |
+> |      |      |
+>
+
+## Original Comment
+
+%[4]s`, githubCommentAuthorName, comment.ID, comment.Created.Format(dateFormat), comment.Body)
+		if len(commentBody) > githubBodyLimit {
+			logger.Warn("comment was truncated due to platform limits", "owner", githubPath[0], "repo", githubPath[1], "gitea_item", giteaItemId, "github_item", githubItemId, "comment_id", comment.ID)
+			commentBody = strings.ReplaceAll(commentBody, "This comment was migrated from Gitea", "This comment was migrated from Gitea **and was truncated due to platform limits**")
+			commentBody = commentBody[:githubBodyLimit] + "..."
+		}
+
+		foundExistingComment := false
+		for _, githubComment := range githubComments {
+			if githubComment == nil {
+				continue
+			}
+
+			if strings.Contains(githubComment.GetBody(), fmt.Sprintf("**Comment ID** | %d", comment.ID)) {
+				foundExistingComment = true
+
+				if githubComment.Body == nil || *githubComment.Body != commentBody {
+					logger.Debug("updating comment", "owner", githubPath[0], "repo", githubPath[1], "item_id", githubItemId, "comment_id", githubComment.GetID())
+					githubComment.Body = &commentBody
+					if _, _, err = gh.Issues.EditComment(ctx, githubPath[0], githubPath[1], githubComment.GetID(), githubComment); err != nil {
+						// TODO: think about whether to allow "!foundExistingComment" branch to create a new comment on error; previously loop-break instead of return
+						return fmt.Errorf("updating comments: %v", err)
+					}
+				}
+			} else {
+				logger.Trace("existing comment is up-to-date", "owner", githubPath[0], "repo", githubPath[1], "item_id", githubItemId, "comment_id", githubComment.GetID())
+			}
+		}
+
+		if !foundExistingComment {
+			logger.Debug("creating comment", "owner", githubPath[0], "repo", githubPath[1], "item_id", githubItemId)
+			newComment := github.IssueComment{
+				Body: &commentBody,
+			}
+			if _, _, err = gh.Issues.CreateComment(ctx, githubPath[0], githubPath[1], githubItemId, &newComment); err != nil {
+				return fmt.Errorf("creating comment: %v", err)
+			}
+		}
+	}
+
+	return nil
 }
