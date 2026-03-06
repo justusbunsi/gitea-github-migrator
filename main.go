@@ -425,33 +425,15 @@ func printReport(ctx context.Context, projects []Project) {
 	fmt.Println()
 }
 
-func reportProject(_ context.Context, proj []string) (*Report, error) {
+func reportProject(ctx context.Context, proj []string) (*Report, error) {
 	giteaPath, _, err := parseProjectSlugs(proj)
 	if err != nil {
 		return nil, fmt.Errorf("parsing project slugs: %v", err)
 	}
 
-	var pullRequests []*gitea.PullRequest
-
-	opts := gitea.ListPullRequestsOptions{
-		State: gitea.StateAll,
-		Sort:  "oldest",
-	}
-
-	logger.Debug("retrieving Gitea pull requests", "owner", giteaPath[0], "repo", giteaPath[1])
-	for {
-		result, resp, err := gi.ListRepoPullRequests(giteaPath[0], giteaPath[1], opts)
-		if err != nil {
-			return nil, fmt.Errorf("retrieving gitea pull requests: %v", err)
-		}
-
-		pullRequests = append(pullRequests, result...)
-
-		if resp.NextPage == 0 {
-			break
-		}
-
-		opts.Page = resp.NextPage
+	pullRequests, err := getAllGiteaPullRequests(ctx, giteaPath[0], giteaPath[1])
+	if err != nil {
+		return nil, err
 	}
 
 	return &Report{
@@ -710,28 +692,10 @@ func migrateProject(ctx context.Context, proj []string) error {
 }
 
 func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, defaultBranch string, giteaRepository *gitea.Repository, gitRepo *git.Repository) {
-	var giteaPullRequests []*gitea.PullRequest
-
-	opts := gitea.ListPullRequestsOptions{
-		State: gitea.StateAll,
-		Sort:  "oldest",
-	}
-
-	logger.Debug("retrieving Gitea pull requests", "owner", giteaPath[0], "repo", giteaPath[1])
-	for {
-		result, resp, err := gi.ListRepoPullRequests(giteaPath[0], giteaPath[1], opts)
-		if err != nil {
-			sendErr(fmt.Errorf("retrieving gitea pull requests: %v", err))
-			return
-		}
-
-		giteaPullRequests = append(giteaPullRequests, result...)
-
-		if resp.NextPage == 0 {
-			break
-		}
-
-		opts.Page = resp.NextPage
+	giteaPullRequests, err := getAllGiteaPullRequests(ctx, giteaPath[0], giteaPath[1])
+	if err != nil {
+		sendErr(err)
+		return
 	}
 
 	var successCount, failureCount int
