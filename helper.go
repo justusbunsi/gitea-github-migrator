@@ -174,6 +174,34 @@ func getAllGiteaPullRequests(ctx context.Context, owner, repo string) ([]*gitea.
 	return pullRequests, nil
 }
 
+func getAllGiteaPullRequestCommits(ctx context.Context, owner, repo string, repoId, pullRequestId int64) ([]*gitea.Commit, error) {
+	var commits []*gitea.Commit
+	opts := gitea.ListPullRequestCommitsOptions{}
+
+	logger.Trace("retrieving commits for pull request", "owner", owner, "repo", repo, "repository_id", repoId, "pr_number", pullRequestId)
+	for {
+		// Check for context cancellation
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("retrieving Gitea pull requests: %v", err)
+		}
+
+		result, resp, err := gi.ListPullRequestCommits(owner, repo, pullRequestId, opts)
+		if err != nil {
+			return nil, fmt.Errorf("retrieving pull request commits: %v", err)
+		}
+
+		commits = append(commits, result...)
+
+		if resp.NextPage == 0 {
+			break
+		}
+
+		opts.Page = resp.NextPage
+	}
+
+	return commits, nil
+}
+
 // smartRenovateBodyTruncate considers too-long-to-handle Pull Requests as created by Renovate.
 // Those Pull Requests tend to exceed the limit by providing a very large "Release Notes" section.
 // To mitigate migration errors, we truncate those body contents similar to how Renovate handles the limit.

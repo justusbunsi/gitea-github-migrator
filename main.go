@@ -787,11 +787,9 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 			giteaPullRequest.Head.Ref = sourceBranchForClosedPullRequest
 			giteaPullRequest.Base.Ref = targetBranchForClosedPullRequest
 
-			logger.Trace("retrieving commits for pull request", "owner", giteaPath[0], "repo", giteaPath[1], "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index)
-			giteaPullRequestCommits, _, err := gi.ListPullRequestCommits(giteaPath[0], giteaPath[1], giteaPullRequest.Index, gitea.ListPullRequestCommitsOptions{})
-			// TODO: Use "link" header to collect all available pages
+			giteaPullRequestCommits, err := getAllGiteaPullRequestCommits(ctx, giteaPath[0], giteaPath[1], giteaRepository.ID, giteaPullRequest.Index)
 			if err != nil {
-				sendErr(fmt.Errorf("retrieving pull request commits: %v", err))
+				sendErr(err)
 				failureCount++
 				continue
 			}
