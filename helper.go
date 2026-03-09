@@ -202,6 +202,16 @@ func getAllGiteaPullRequestCommits(ctx context.Context, owner, repo string, repo
 	return commits, nil
 }
 
+// getGitHubAccountReference reads the Gitea account website property for any GitHub account references.
+// If found a GitHub account reference, that reference is used. Fallback is the original Gitea account name.
+func getGitHubAccountReference(giteaUser *gitea.User) string {
+	if giteaUser.Website != "" && strings.Index(giteaUser.Website, "https://github.com/") == 0 {
+		return "@" + strings.TrimPrefix(strings.ToLower(giteaUser.Website), "https://github.com/")
+	}
+
+	return giteaUser.UserName
+}
+
 // smartRenovateBodyTruncate considers too-long-to-handle Pull Requests as created by Renovate.
 // Those Pull Requests tend to exceed the limit by providing a very large "Release Notes" section.
 // To mitigate migration errors, we truncate those body contents similar to how Renovate handles the limit.

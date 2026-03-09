@@ -902,21 +902,6 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 			giteaPullRequest.Base.Ref = defaultBranch
 		}
 
-		githubAuthorName := giteaPullRequest.Poster.UserName
-
-		// TODO: Check if needed
-		author, err := getGiteaUser(giteaPullRequest.Poster.UserName)
-		if err != nil {
-			sendErr(fmt.Errorf("retrieving gitea user: %v", err))
-			failureCount++
-			continue
-		}
-		if author.Website != "" {
-			// TODO: Support enterprise GitHub website URL
-			// TODO: What?
-			githubAuthorName = "@" + strings.TrimPrefix(strings.ToLower(author.Website), "https://github.com/")
-		}
-
 		originalState := ""
 		if !strings.EqualFold(string(giteaPullRequest.State), string(gitea.StateOpen)) {
 			if giteaPullRequest.HasMerged && giteaPullRequest.Merged != nil {
@@ -934,15 +919,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 		} else {
 			for _, review := range reviews {
 				if review.State == gitea.ReviewStateApproved {
-					approver := review.Reviewer.UserName
-
-					if review.Reviewer.Website != "" {
-						// TODO: Support enterprise GitHub website URL
-						// TODO: What?
-						approver = "@" + strings.TrimPrefix(strings.ToLower(review.Reviewer.Website), "https://github.com/")
-					}
-
-					approvers = append(approvers, approver)
+					approvers = append(approvers, getGitHubAccountReference(review.Reviewer))
 				}
 			}
 		}
@@ -984,7 +961,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 
 ## Original Description
 
-%[3]s`, githubAuthorName, giteaPullRequest.Index, description, giteaPath[0], giteaPath[1], giteaPullRequest.Created.Format(dateFormat), closeDetails, approval, originalState, giteaDomain, giteaPullRequest.Title)
+%[3]s`, getGitHubAccountReference(giteaPullRequest.Poster), giteaPullRequest.Index, description, giteaPath[0], giteaPath[1], giteaPullRequest.Created.Format(dateFormat), closeDetails, approval, originalState, giteaDomain, giteaPullRequest.Title)
 
 		if len(body) > githubBodyLimit {
 			logger.Warn("pull request body was truncated due to platform limits", "owner", githubPath[0], "repo", githubPath[1], "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
@@ -1127,18 +1104,6 @@ func migrateItemComments(ctx context.Context, githubPath, giteaPath []string, gi
 			continue
 		}
 
-		githubCommentAuthorName := comment.Poster.UserName
-
-		commentAuthor, err := getGiteaUser(comment.Poster.UserName)
-		if err != nil {
-			return fmt.Errorf("retrieving gitea user: %v", err)
-		}
-		if commentAuthor.Website != "" {
-			// TODO: Support enterprise GitHub website URL
-			// TODO: What?
-			githubCommentAuthorName = "@" + strings.TrimPrefix(strings.ToLower(commentAuthor.Website), "https://github.com/")
-		}
-
 		commentBody := fmt.Sprintf(`> [!NOTE]
 > This comment was migrated from Gitea
 >
@@ -1152,7 +1117,7 @@ func migrateItemComments(ctx context.Context, githubPath, giteaPath []string, gi
 
 ## Original Comment
 
-%[4]s`, githubCommentAuthorName, comment.ID, comment.Created.Format(dateFormat), comment.Body)
+%[4]s`, getGitHubAccountReference(comment.Poster), comment.ID, comment.Created.Format(dateFormat), comment.Body)
 		if len(commentBody) > githubBodyLimit {
 			logger.Warn("comment was truncated due to platform limits", "owner", githubPath[0], "repo", githubPath[1], "gitea_item", giteaItemId, "github_item", githubItemId, "comment_id", comment.ID)
 			commentBody = strings.ReplaceAll(commentBody, "This comment was migrated from Gitea", "This comment was migrated from Gitea **and was truncated due to platform limits**")
