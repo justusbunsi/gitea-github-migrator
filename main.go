@@ -711,6 +711,20 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 			break
 		}
 
+		giteaPullRequestCommits, err := getAllGiteaPullRequestCommits(ctx, giteaPath[0], giteaPath[1], giteaRepository.ID, giteaPullRequest.Index)
+		if err != nil {
+			sendErr(err)
+			failureCount++
+			continue
+		}
+
+		// Some pull requests have no commits, disregard these
+		if len(giteaPullRequestCommits) == 0 {
+			// TODO: Create temporary commit in order to create the PR itself. Then, hard reset onto the actual HEAD commit
+			logger.Debug("skipping pull request with empty commit list", "owner", giteaPath[0], "repo", giteaPath[1], "pr_number", giteaPullRequest.Index)
+			continue
+		}
+
 		sourceBranchForClosedPullRequest := fmt.Sprintf("migration-source-%d/%s", giteaPullRequest.Index, giteaPullRequest.Head.Ref)
 		targetBranchForClosedPullRequest := fmt.Sprintf("migration-target-%d/%s", giteaPullRequest.Index, giteaPullRequest.Base.Ref)
 
@@ -786,20 +800,6 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 			// Generate temporary branch names
 			giteaPullRequest.Head.Ref = sourceBranchForClosedPullRequest
 			giteaPullRequest.Base.Ref = targetBranchForClosedPullRequest
-
-			giteaPullRequestCommits, err := getAllGiteaPullRequestCommits(ctx, giteaPath[0], giteaPath[1], giteaRepository.ID, giteaPullRequest.Index)
-			if err != nil {
-				sendErr(err)
-				failureCount++
-				continue
-			}
-
-			// Some pull requests have no commits, disregard these
-			if len(giteaPullRequestCommits) == 0 {
-				// TODO: Create temporary commit in order to create the PR itself. Then, hard reset onto the actual HEAD commit
-				logger.Trace("skipping closed pull request with empty commit list", "owner", giteaPath[0], "repo", giteaPath[1], "pr_number", giteaPullRequest.Index)
-				continue
-			}
 
 			// API returns commits from newest to oldest, we need to reverse
 			slices.Reverse(giteaPullRequestCommits)
