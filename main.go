@@ -796,6 +796,8 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 
 			// Some pull requests have no commits, disregard these
 			if len(giteaPullRequestCommits) == 0 {
+				// TODO: Create temporary commit in order to create the PR itself. Then, hard reset onto the actual HEAD commit
+				logger.Trace("skipping closed pull request with empty commit list", "owner", giteaPath[0], "repo", giteaPath[1], "pr_number", giteaPullRequest.Index)
 				continue
 			}
 
