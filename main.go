@@ -718,18 +718,17 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 			continue
 		}
 
-		// Some pull requests have no commits, disregard these
-		if len(giteaPullRequestCommits) == 0 {
-			// TODO: Create temporary commit in order to create the PR itself. Then, hard reset onto the actual HEAD commit
-			logger.Debug("skipping pull request with empty commit list", "owner", giteaPath[0], "repo", giteaPath[1], "pr_number", giteaPullRequest.Index)
-			continue
-		}
-
 		sourceBranchForClosedPullRequest := fmt.Sprintf("migration-source-%d/%s", giteaPullRequest.Index, giteaPullRequest.Head.Ref)
 		targetBranchForClosedPullRequest := fmt.Sprintf("migration-target-%d/%s", giteaPullRequest.Index, giteaPullRequest.Base.Ref)
 
-		var cleanUpBranch bool
+		var cleanUpBranch, tmpEmptyCommitRequired bool
 		var githubPullRequest *github.PullRequest
+
+		// Some pull requests have no commits, flag these for later handling
+		if len(giteaPullRequestCommits) == 0 {
+			logger.Debug("pull request with empty commit list", "owner", giteaPath[0], "repo", giteaPath[1], "pr_number", giteaPullRequest.Index)
+			tmpEmptyCommitRequired = true
+		}
 
 		logger.Debug("searching for any existing pull request", "owner", githubPath[0], "repo", githubPath[1], "pr_number", giteaPullRequest.Index)
 		sourceBranches := []string{giteaPullRequest.Head.Ref, sourceBranchForClosedPullRequest}
@@ -785,17 +784,80 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 			continue
 		}
 
-		// Proceed to create temporary branches when migrating a merged/closed merge request that doesn't yet have a counterpart PR in GitHub (can't create one without a branch)
-		if githubPullRequest == nil && !strings.EqualFold(string(giteaPullRequest.State), string(gitea.StateOpen)) {
-			logger.Trace("searching for existing branch for closed/merged pull request", "owner", giteaPath[0], "repo", giteaPath[1], "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index, "source_branch", giteaPullRequest.Head.Ref)
+		worktree, err := gitRepo.Worktree()
+		if err != nil {
+			sendErr(fmt.Errorf("creating worktree: %v", err))
+			failureCount++
+			continue
+		}
 
-			// Create a worktree
-			worktree, err := gitRepo.Worktree()
-			if err != nil {
-				sendErr(fmt.Errorf("creating worktree: %v", err))
+		if githubPullRequest == nil && tmpEmptyCommitRequired {
+			logger.Debug("creating empty migration commit", "pr_number", giteaPullRequest.Index)
+
+			logger.Trace("checkout source branch for empty commit list pull request", "owner", giteaPath[0], "repo", giteaPath[1], "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index)
+			if err = worktree.Checkout(&git.CheckoutOptions{
+				Create: false,
+				Force:  true,
+				Branch: plumbing.NewBranchReferenceName(giteaPullRequest.Head.Ref),
+			}); err != nil {
+				sendErr(fmt.Errorf("checking out temporary empty commit list source branch: %v", err))
 				failureCount++
 				continue
 			}
+
+			if err = worktree.Reset(&git.ResetOptions{Mode: git.HardReset, Commit: plumbing.NewHash(giteaPullRequest.Head.Sha)}); err != nil {
+				sendErr(fmt.Errorf("reset empty commit list pull request branch: %v", err))
+				failureCount++
+				continue
+			}
+
+			emptyMigrationCommit, err := worktree.Commit("Migrator-required empty commit", &git.CommitOptions{
+				AllowEmptyCommits: true,
+				Author: &object.Signature{
+					Name:  "Gitea GitHub Migrator",
+					Email: "gitea-github-migrator@example.com",
+					When:  time.Now(),
+				},
+				Committer: &object.Signature{
+					Name:  "Gitea GitHub Migrator",
+					Email: "gitea-github-migrator@example.com",
+					When:  time.Now(),
+				},
+			})
+			if err != nil {
+				sendErr(fmt.Errorf("creating empty migration commit: %v", err))
+				failureCount++
+				continue
+			}
+
+			giteaPullRequestCommits = append(giteaPullRequestCommits, &gitea.Commit{
+				CommitMeta: &gitea.CommitMeta{SHA: emptyMigrationCommit.String()},
+			})
+
+			if strings.EqualFold(string(giteaPullRequest.State), string(gitea.StateOpen)) {
+				logger.Trace("pushing source branch for empty commit list pull request", "owner", giteaPath[0], "repo", giteaPath[1], "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index)
+
+				if err = gitRepo.PushContext(ctx, &git.PushOptions{
+					RemoteName: "github",
+					RefSpecs: []config.RefSpec{
+						config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", giteaPullRequest.Head.Ref)),
+					},
+					Force: true,
+				}); err != nil {
+					if errors.Is(err, git.NoErrAlreadyUpToDate) {
+						logger.Trace("empty commit list branch already exists and is up-to-date on GitHub", "owner", githubPath[0], "repo", githubPath[1], "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
+					} else {
+						sendErr(fmt.Errorf("pushing temporary empty commit list branch to github: %v", err))
+						failureCount++
+						continue
+					}
+				}
+			}
+		}
+
+		// Proceed to create temporary branches when migrating a merged/closed merge request that doesn't yet have a counterpart PR in GitHub (can't create one without a branch)
+		if githubPullRequest == nil && !strings.EqualFold(string(giteaPullRequest.State), string(gitea.StateOpen)) {
+			logger.Trace("searching for existing branch for closed/merged pull request", "owner", giteaPath[0], "repo", giteaPath[1], "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index, "source_branch", giteaPullRequest.Head.Ref)
 
 			// Generate temporary branch names
 			giteaPullRequest.Head.Ref = sourceBranchForClosedPullRequest
@@ -982,6 +1044,49 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 				sendErr(fmt.Errorf("creating pull request: %v", err))
 				failureCount++
 				continue
+			}
+
+			if tmpEmptyCommitRequired {
+				logger.Debug("reset empty commit list pull request branch to actual commit", "pr_number", giteaPullRequest.Index, "source_branch", giteaPullRequest.Head.Ref, "actual_commit", giteaPullRequest.Head.Sha)
+				if err = worktree.Checkout(&git.CheckoutOptions{
+					Create: false,
+					Force:  true,
+					Branch: plumbing.NewBranchReferenceName(giteaPullRequest.Head.Ref),
+				}); err != nil {
+					sendErr(fmt.Errorf("checking out to-reset empty commit list branch: %v", err))
+					failureCount++
+					continue
+				}
+
+				if err = worktree.Reset(&git.ResetOptions{Mode: git.HardReset, Commit: plumbing.NewHash(giteaPullRequest.Head.Sha)}); err != nil {
+					sendErr(fmt.Errorf("reset empty commit list pull request branch: %v", err))
+					failureCount++
+					continue
+				}
+
+				logger.Trace("pushing reset empty commit list pull request branch", "owner", giteaPath[0], "repo", giteaPath[1], "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index)
+
+				if err = gitRepo.PushContext(ctx, &git.PushOptions{
+					RemoteName: "github",
+					RefSpecs: []config.RefSpec{
+						config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", giteaPullRequest.Head.Ref)),
+					},
+					Force: true,
+				}); err != nil {
+					if errors.Is(err, git.NoErrAlreadyUpToDate) {
+						logger.Trace("empty commit list branch already exists and is up-to-date on GitHub", "owner", githubPath[0], "repo", githubPath[1], "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
+					} else {
+						sendErr(fmt.Errorf("pushing reset temporary empty commit list branch to github: %v", err))
+						failureCount++
+						continue
+					}
+				}
+				githubPullRequest.Head.SHA = pointer(giteaPullRequest.Head.Sha)
+				if githubPullRequest, _, err = gh.PullRequests.Edit(ctx, githubPath[0], githubPath[1], githubPullRequest.GetNumber(), githubPullRequest); err != nil {
+					sendErr(fmt.Errorf("updating pull request: %v", err))
+					failureCount++
+					continue
+				}
 			}
 
 			if giteaPullRequest.State == gitea.StateClosed {
