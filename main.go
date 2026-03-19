@@ -1087,6 +1087,17 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 					failureCount++
 					continue
 				}
+
+				logger.Debug("creating empty commit list auto-close comment", "owner", githubPath[0], "repo", githubPath[1], "pr_number", giteaPullRequest.Index)
+				newComment := github.IssueComment{
+					Body: pointer(`> [!CAUTION]
+>
+> **Due to platform limitations of handling PRs with an empty commit history, this PR was flagged as "merged". This does not represent its original state within Gitea.**`),
+				}
+				if _, _, err = gh.Issues.CreateComment(ctx, githubPath[0], githubPath[1], githubPullRequest.GetNumber(), &newComment); err != nil {
+					sendErr(fmt.Errorf("creating empty commit list auto-close comment: %v", err))
+					failureCount++
+				}
 			}
 
 			if giteaPullRequest.State == gitea.StateClosed {
