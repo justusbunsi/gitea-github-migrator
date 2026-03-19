@@ -174,34 +174,6 @@ func getAllGiteaPullRequests(ctx context.Context, owner, repo string) ([]*gitea.
 	return pullRequests, nil
 }
 
-func getAllGiteaPullRequestCommits(ctx context.Context, owner, repo string, repoId, pullRequestId int64) ([]*gitea.Commit, error) {
-	var commits []*gitea.Commit
-	opts := gitea.ListPullRequestCommitsOptions{}
-
-	logger.Trace("retrieving commits for pull request", "owner", owner, "repo", repo, "repository_id", repoId, "pr_number", pullRequestId)
-	for {
-		// Check for context cancellation
-		if err := ctx.Err(); err != nil {
-			return nil, fmt.Errorf("retrieving Gitea pull requests: %v", err)
-		}
-
-		result, resp, err := gi.ListPullRequestCommits(owner, repo, pullRequestId, opts)
-		if err != nil {
-			return nil, fmt.Errorf("retrieving pull request commits: %v", err)
-		}
-
-		commits = append(commits, result...)
-
-		if resp.NextPage == 0 {
-			break
-		}
-
-		opts.Page = resp.NextPage
-	}
-
-	return commits, nil
-}
-
 // getGitHubAccountReference reads the Gitea account website property for any GitHub account references.
 // If found a GitHub account reference, that reference is used. Fallback is the original Gitea account name.
 func getGitHubAccountReference(giteaUser *gitea.User) string {
