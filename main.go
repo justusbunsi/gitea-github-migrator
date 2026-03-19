@@ -721,9 +721,22 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 
 		var cleanUpBranch, tmpEmptyCommitRequired bool
 		var githubPullRequest *github.PullRequest
+		logger.Trace("retrieve pull request head ref", "owner", giteaPath[0], "repo", giteaPath[1], "pr_number", giteaPullRequest.Index)
+		prHeadRefs, _, err := gi.GetRepoRefs(giteaPath[0], giteaPath[1], fmt.Sprintf("pull/%d/head", giteaPullRequest.Index))
+		if err != nil {
+			sendErr(fmt.Errorf("retrieve head ref for pull request %d: %v", giteaPullRequest.Index, err))
+			failureCount++
+			continue
+		}
+		if len(prHeadRefs) == 0 {
+			sendErr(fmt.Errorf("no head ref for pull request %d found", giteaPullRequest.Index))
+			failureCount++
+			continue
+		}
+		prHeadRef := prHeadRefs[0].Object.SHA
 
 		// Some pull requests have no commits, flag these for later handling
-		if strings.EqualFold(giteaPullRequest.MergeBase, giteaPullRequest.Head.Sha) {
+		if strings.EqualFold(giteaPullRequest.MergeBase, prHeadRef) {
 			logger.Debug("pull request with empty commit list", "owner", giteaPath[0], "repo", giteaPath[1], "pr_number", giteaPullRequest.Index)
 			tmpEmptyCommitRequired = true
 		}
@@ -805,7 +818,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 					continue
 				}
 
-				if err = worktree.Reset(&git.ResetOptions{Mode: git.HardReset, Commit: plumbing.NewHash(giteaPullRequest.Head.Sha)}); err != nil {
+				if err = worktree.Reset(&git.ResetOptions{Mode: git.HardReset, Commit: plumbing.NewHash(prHeadRef)}); err != nil {
 					sendErr(fmt.Errorf("reset empty commit list pull request branch: %v", err))
 					failureCount++
 					continue
@@ -882,7 +895,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 				if tmpEmptyCommitRequired {
 					prHeadHash = emptyMigrationCommit
 				} else {
-					prHeadHash = plumbing.NewHash(giteaPullRequest.Head.Sha)
+					prHeadHash = plumbing.NewHash(prHeadRef)
 				}
 				logger.Trace("creating source branch for merged/closed pull request", "owner", giteaPath[0], "repo", giteaPath[1], "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index, "branch", giteaPullRequest.Head.Ref, "sha", prHeadHash)
 				if err = worktree.Checkout(&git.CheckoutOptions{
@@ -1008,7 +1021,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 			}
 
 			if tmpEmptyCommitRequired {
-				logger.Debug("reset empty commit list pull request branch to actual commit", "pr_number", giteaPullRequest.Index, "source_branch", giteaPullRequest.Head.Ref, "actual_commit", giteaPullRequest.Head.Sha)
+				logger.Debug("reset empty commit list pull request branch to actual commit", "pr_number", giteaPullRequest.Index, "source_branch", giteaPullRequest.Head.Ref, "actual_commit", prHeadRef)
 				if err = worktree.Checkout(&git.CheckoutOptions{
 					Create: false,
 					Force:  true,
@@ -1019,7 +1032,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 					continue
 				}
 
-				if err = worktree.Reset(&git.ResetOptions{Mode: git.HardReset, Commit: plumbing.NewHash(giteaPullRequest.Head.Sha)}); err != nil {
+				if err = worktree.Reset(&git.ResetOptions{Mode: git.HardReset, Commit: plumbing.NewHash(prHeadRef)}); err != nil {
 					sendErr(fmt.Errorf("reset empty commit list pull request branch: %v", err))
 					failureCount++
 					continue
@@ -1042,7 +1055,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 						continue
 					}
 				}
-				githubPullRequest.Head.SHA = pointer(giteaPullRequest.Head.Sha)
+				githubPullRequest.Head.SHA = pointer(prHeadRef)
 				if githubPullRequest, _, err = gh.PullRequests.Edit(ctx, githubPath[0], githubPath[1], githubPullRequest.GetNumber(), githubPullRequest); err != nil {
 					sendErr(fmt.Errorf("updating pull request: %v", err))
 					failureCount++
