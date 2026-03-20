@@ -803,28 +803,56 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 		}
 
 		if githubPullRequest == nil {
-			var emptyMigrationCommit plumbing.Hash
-			if tmpEmptyCommitRequired {
-				logger.Debug("creating empty migration commit", "pr_number", giteaPullRequest.Index)
+			logger.Trace("loading pull request head commit", "owner", giteaPath[0], "repo", giteaPath[1], "pr_number", giteaPullRequest.Index, "head_sha", prHeadRef)
+			prHeadHash := plumbing.NewHash(prHeadRef)
+			prHeadCommit, err := object.GetCommit(gitRepo.Storer, prHeadHash)
+			if err != nil {
+				sendErr(fmt.Errorf("loading pull request head commit: %v", err))
+				failureCount++
+				continue
+			}
+			logger.Trace("loading merge base", "owner", giteaPath[0], "repo", giteaPath[1], "pr_number", giteaPullRequest.Index, "pr_merge_base", giteaPullRequest.MergeBase)
+			mergeBaseHash := plumbing.NewHash(giteaPullRequest.MergeBase)
+			mergeBaseCommit, err := object.GetCommit(gitRepo.Storer, mergeBaseHash)
+			if err != nil {
+				sendErr(fmt.Errorf("loading merge base: %v", err))
+				failureCount++
+				continue
+			}
+			logger.Trace("detecting best common ancestor", "owner", giteaPath[0], "repo", giteaPath[1], "pr_number", giteaPullRequest.Index, "base", mergeBaseHash, "head", prHeadHash)
+			bases, err := mergeBaseCommit.MergeBase(prHeadCommit)
+			if err != nil {
+				sendErr(fmt.Errorf("detecting best common ancestor: %v", err))
+				failureCount++
+				continue
+			}
+			if len(bases) == 0 {
+				logger.Trace("orphaned head commit detected", "owner", giteaPath[0], "repo", giteaPath[1], "pr_number", giteaPullRequest.Index, "sha", prHeadHash)
+				tmpEmptyCommitRequired = true
+			}
 
+			if tmpEmptyCommitRequired {
 				logger.Trace("checkout source branch for empty commit list pull request", "owner", giteaPath[0], "repo", giteaPath[1], "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index)
 				if err = worktree.Checkout(&git.CheckoutOptions{
-					Create: false,
+					Create: conditional(giteaPullRequest.State == gitea.StateOpen, false, true),
 					Force:  true,
-					Branch: plumbing.NewBranchReferenceName(giteaPullRequest.Head.Ref),
+					Branch: plumbing.NewBranchReferenceName(conditional(giteaPullRequest.State == gitea.StateClosed, sourceBranchForClosedPullRequest, giteaPullRequest.Head.Ref)),
 				}); err != nil {
-					sendErr(fmt.Errorf("checking out temporary empty commit list source branch: %v", err))
+					sendErr(fmt.Errorf("checking out temporary empty commit list source branch for pull request #%d: %v", giteaPullRequest.Index, err))
 					failureCount++
 					continue
 				}
 
-				if err = worktree.Reset(&git.ResetOptions{Mode: git.HardReset, Commit: plumbing.NewHash(prHeadRef)}); err != nil {
+				resetHash := conditional(len(bases) == 0, mergeBaseHash, prHeadHash)
+				logger.Trace("reset worktree for migrator-required empty commit", "owner", giteaPath[0], "repo", giteaPath[1], "pr_number", giteaPullRequest.Index, "reset_to_sha", resetHash)
+				if err = worktree.Reset(&git.ResetOptions{Mode: git.HardReset, Commit: resetHash}); err != nil {
 					sendErr(fmt.Errorf("reset empty commit list pull request branch: %v", err))
 					failureCount++
 					continue
 				}
 
-				emptyMigrationCommit, err = worktree.Commit("Migrator-required empty commit", &git.CommitOptions{
+				logger.Debug("creating empty migration commit", "pr_number", giteaPullRequest.Index)
+				prHeadHash, err = worktree.Commit("Migrator-required empty commit", &git.CommitOptions{
 					AllowEmptyCommits: true,
 					Author: &object.Signature{
 						Name:  "Gitea GitHub Migrator",
@@ -872,13 +900,6 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 				giteaPullRequest.Head.Ref = sourceBranchForClosedPullRequest
 				giteaPullRequest.Base.Ref = targetBranchForClosedPullRequest
 
-				mergeBaseCommit, err := object.GetCommit(gitRepo.Storer, plumbing.NewHash(giteaPullRequest.MergeBase))
-				if err != nil {
-					sendErr(fmt.Errorf("loading merge base: %v", err))
-					failureCount++
-					continue
-				}
-
 				logger.Trace("creating target branch for merged/closed pull request", "owner", giteaPath[0], "repo", giteaPath[1], "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index, "branch", giteaPullRequest.Base.Ref, "sha", mergeBaseCommit.Hash)
 				if err = worktree.Checkout(&git.CheckoutOptions{
 					Create: true,
@@ -891,18 +912,12 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 					continue
 				}
 
-				var prHeadHash plumbing.Hash
-				if tmpEmptyCommitRequired {
-					prHeadHash = emptyMigrationCommit
-				} else {
-					prHeadHash = plumbing.NewHash(prHeadRef)
-				}
 				logger.Trace("creating source branch for merged/closed pull request", "owner", giteaPath[0], "repo", giteaPath[1], "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index, "branch", giteaPullRequest.Head.Ref, "sha", prHeadHash)
 				if err = worktree.Checkout(&git.CheckoutOptions{
-					Create: true,
+					Create: conditional(tmpEmptyCommitRequired, false, true),
 					Force:  true,
 					Branch: plumbing.NewBranchReferenceName(giteaPullRequest.Head.Ref),
-					Hash:   prHeadHash,
+					Hash:   conditional(tmpEmptyCommitRequired, plumbing.ZeroHash, prHeadHash),
 				}); err != nil {
 					sendErr(fmt.Errorf("checking out temporary source branch: %v", err))
 					failureCount++
@@ -1014,7 +1029,6 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 				Draft:               &giteaPullRequest.Draft,
 			}
 			if githubPullRequest, _, err = gh.PullRequests.Create(ctx, githubPath[0], githubPath[1], &newPullRequest); err != nil {
-				// TODO: PRs with orphaned commits
 				sendErr(fmt.Errorf("creating pull request: %v", err))
 				failureCount++
 				continue
@@ -1066,7 +1080,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 				newComment := github.IssueComment{
 					Body: pointer(`> [!CAUTION]
 >
-> **Due to platform limitations of handling PRs with an empty commit history, this PR was flagged as "merged". This does not represent its original state within Gitea.**`),
+> **Due to platform limitations in handling PRs with empty commit history or orphaned commits, this PR was flagged as "merged" or "closed". This does not necessarily represent its original state within Gitea.**`),
 				}
 				if _, _, err = gh.Issues.CreateComment(ctx, githubPath[0], githubPath[1], githubPullRequest.GetNumber(), &newComment); err != nil {
 					sendErr(fmt.Errorf("creating empty commit list auto-close comment: %v", err))
@@ -1242,7 +1256,7 @@ func migrateItemComments(ctx context.Context, githubPath, giteaPath []string, gi
 				Body: &commentBody,
 			}
 			if _, _, err = gh.Issues.CreateComment(ctx, githubPath[0], githubPath[1], githubItemId, &newComment); err != nil {
-				return fmt.Errorf("creating comment: %v", err)
+				return fmt.Errorf("creating comment for gitea item #%d (#%d): %v", giteaItemId, githubItemId, err)
 			}
 		}
 	}

@@ -122,6 +122,13 @@ func pointer[T any](v T) *T {
 	return &v
 }
 
+func conditional[T any](cond bool, truthyValue, falsyValue T) T {
+	if cond {
+		return truthyValue
+	}
+	return falsyValue
+}
+
 func roundDuration(d, r time.Duration) time.Duration {
 	if r <= 0 {
 		return d
