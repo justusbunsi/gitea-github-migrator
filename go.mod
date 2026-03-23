@@ -7,10 +7,9 @@ require (
 	github.com/go-git/go-billy/v5 v5.7.0
 	github.com/go-git/go-git/v5 v5.16.5
 	github.com/gofri/go-github-pagination v1.0.1
+	github.com/gofri/go-github-ratelimit/v2 v2.0.2
 	github.com/google/go-github/v74 v74.0.0
-	github.com/hashicorp/go-cleanhttp v0.5.2
 	github.com/hashicorp/go-hclog v1.6.3
-	github.com/hashicorp/go-retryablehttp v0.7.8
 )
 
 require (

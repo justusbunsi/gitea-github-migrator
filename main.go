@@ -9,7 +9,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -29,10 +28,11 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/storage/memory"
 	"github.com/gofri/go-github-pagination/githubpagination"
+	"github.com/gofri/go-github-ratelimit/v2/github_ratelimit"
+	"github.com/gofri/go-github-ratelimit/v2/github_ratelimit/github_primary_ratelimit"
+	"github.com/gofri/go-github-ratelimit/v2/github_ratelimit/github_secondary_ratelimit"
 	"github.com/google/go-github/v74/github"
-	"github.com/hashicorp/go-cleanhttp"
 	"github.com/hashicorp/go-hclog"
-	"github.com/hashicorp/go-retryablehttp"
 )
 
 const (
@@ -188,137 +188,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	retryClient := &retryablehttp.Client{
-		HTTPClient:   cleanhttp.DefaultPooledClient(),
-		Logger:       nil,
-		RetryMax:     2,
-		RetryWaitMin: 30 * time.Second,
-		RetryWaitMax: 300 * time.Second,
-	}
-
-	retryClient.Backoff = func(min, max time.Duration, attemptNum int, resp *http.Response) (sleep time.Duration) {
-		requestMethod := "unknown"
-		requestUrl := "unknown"
-
-		if req := resp.Request; req != nil {
-			requestMethod = req.Method
-			if req.URL != nil {
-				requestUrl = req.URL.String()
-			}
-		}
-
-		defer func() {
-			logger.Trace("waiting before retrying failed API request", "method", requestMethod, "url", requestUrl, "status", resp.StatusCode, "sleep", sleep, "attempt", attemptNum, "max_attempts", retryClient.RetryMax)
-		}()
-
-		if resp != nil {
-			// Check the Retry-After header
-			if s, ok := resp.Header["Retry-After"]; ok {
-				if retryAfter, err := strconv.ParseInt(s[0], 10, 64); err == nil {
-					sleep = time.Second * time.Duration(retryAfter)
-					return
-				}
-			}
-
-			// Reference:
-			// - https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api?apiVersion=2022-11-28
-			// - https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api?apiVersion=2022-11-28
-			if v, ok := resp.Header["X-Ratelimit-Remaining"]; ok {
-				if remaining, err := strconv.ParseInt(v[0], 10, 64); err == nil && remaining == 0 {
-
-					// If x-ratelimit-reset is present, this indicates the UTC timestamp when we can retry
-					if w, ok := resp.Header["X-Ratelimit-Reset"]; ok {
-						if recoveryEpoch, err := strconv.ParseInt(w[0], 10, 64); err == nil {
-							// Add 30 seconds to recovery timestamp for clock differences
-							sleep = roundDuration(time.Until(time.Unix(recoveryEpoch+30, 0)), time.Second)
-							return
-						}
-					}
-
-					// Otherwise, wait for 60 seconds
-					sleep = 60 * time.Second
-					return
-				}
-			}
-		}
-
-		// Exponential backoff
-		mult := math.Pow(2, float64(attemptNum)) * float64(min)
-		wait := time.Duration(mult)
-		if float64(wait) != mult || wait > max {
-			wait = max
-		}
-
-		sleep = wait
-		return
-	}
-
-	retryClient.CheckRetry = func(ctx context.Context, resp *http.Response, err error) (bool, error) {
-		if err != nil {
-			return false, err
-		}
-
-		// Potential connection reset
-		if resp == nil {
-			return true, nil
-		}
-
-		errResp := GitHubError{}
-		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
-			if err = unmarshalResp(resp, &errResp); err != nil {
-				return false, err
-			}
-		}
-
-		// Token not authorized for org
-		if resp.StatusCode == http.StatusForbidden {
-			if match, err := regexp.MatchString("SAML enforcement", errResp.Message); err != nil {
-				return false, fmt.Errorf("matching 403 response: %v", err)
-			} else if match {
-				msg := errResp.Message
-				if errResp.DocumentationURL != "" {
-					msg += fmt.Sprintf(" - %s", errResp.DocumentationURL)
-				}
-				return false, fmt.Errorf("received 403 with response: %v", msg)
-			}
-		}
-
-		retryableStatuses := []int{
-			http.StatusTooManyRequests, // rate-limiting
-			http.StatusForbidden,       // rate-limiting
-
-			http.StatusRequestTimeout,
-			http.StatusFailedDependency,
-			http.StatusInternalServerError,
-			http.StatusBadGateway,
-			http.StatusServiceUnavailable,
-			http.StatusGatewayTimeout,
-		}
-
-		requestMethod := "unknown"
-		requestUrl := "unknown"
-
-		if req := resp.Request; req != nil {
-			requestMethod = req.Method
-			if req.URL != nil {
-				requestUrl = req.URL.String()
-			}
-		}
-
-		for _, status := range retryableStatuses {
-			if resp.StatusCode == status {
-				logger.Trace("retrying failed API request", "method", requestMethod, "url", requestUrl, "status", resp.StatusCode, "message", errResp.Message)
-				return true, nil
-			}
-		}
-
-		return false, nil
-	}
-
-	transport := &gitHubAdvancedSearchModder{
-		base: &retryablehttp.RoundTripper{Client: retryClient},
-	}
-	client := githubpagination.NewClient(transport, githubpagination.WithPerPage(100))
+	rateLimiter := github_ratelimit.New(nil,
+		github_primary_ratelimit.WithLimitDetectedCallback(func(ctx *github_primary_ratelimit.CallbackContext) {
+			logger.Warn("🔥 Primary rate limit detected", "category", ctx.Category, "reset_time", ctx.ResetTime)
+		}),
+		github_secondary_ratelimit.WithLimitDetectedCallback(func(ctx *github_secondary_ratelimit.CallbackContext) {
+			logger.Warn("🔥 Secondary rate limit detected", "reset_time", ctx.ResetTime, "total_sleep_time", ctx.TotalSleepTime)
+		}),
+	)
+	client := githubpagination.NewClient(rateLimiter, githubpagination.WithPerPage(100))
 
 	if githubDomain == defaultGithubDomain {
 		gh = github.NewClient(client).WithAuthToken(githubToken)
@@ -1195,13 +1073,22 @@ func migrateItemComments(ctx context.Context, githubPath, giteaPath []string, gi
 		opts.Page = resp.NextPage
 	}
 
+	logger.Info("migrating comments from Gitea to GitHub", "owner", githubPath[0], "repo", githubPath[1], "item_id", githubItemId, "count", len(giteaComments))
+
+	if len(giteaComments) == 0 {
+		// We don't need to request GitHub API if there are no comments to be migrated at all. Those secondary rate limit points can be safed.
+		return nil
+	}
+
+	if githubItemId == 0 {
+		return fmt.Errorf("GitHub item id is 0 and would cause the API to retrieve all comments across the repository - leading to high rate limit burning")
+	}
+
 	logger.Debug("retrieving GitHub comments", "owner", githubPath[0], "repo", githubPath[1], "item_id", githubItemId)
 	githubComments, _, err := gh.Issues.ListComments(ctx, githubPath[0], githubPath[1], githubItemId, &github.IssueListCommentsOptions{Sort: pointer("created"), Direction: pointer("asc")})
 	if err != nil {
 		return fmt.Errorf("listing github comments: %v", err)
 	}
-
-	logger.Info("migrating comments from Gitea to GitHub", "owner", githubPath[0], "repo", githubPath[1], "item_id", githubItemId, "count", len(giteaComments))
 
 	for _, comment := range giteaComments {
 		if comment == nil {
