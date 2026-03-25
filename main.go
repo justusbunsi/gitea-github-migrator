@@ -40,6 +40,8 @@ const (
 	defaultGithubDomain = "github.com"
 	defaultGiteaDomain  = "gitea.com"
 	githubBodyLimit     = 58000
+	// See https://docs.github.com/en/enterprise-cloud@latest/rest/using-the-rest-api/best-practices-for-using-the-rest-api?apiVersion=2026-03-10#pause-between-mutative-requests
+	githubApiPauseBetweenMutativeRequests = 1 * time.Second
 )
 
 var loop, report bool
@@ -913,6 +915,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 				failureCount++
 				continue
 			}
+			time.Sleep(githubApiPauseBetweenMutativeRequests)
 
 			if tmpEmptyCommitRequired {
 				logger.Debug("reset empty commit list pull request branch to actual commit", "pr_number", giteaPullRequest.Index, "source_branch", giteaPullRequest.Head.Ref, "actual_commit", prHeadRef)
@@ -955,6 +958,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 					failureCount++
 					continue
 				}
+				time.Sleep(githubApiPauseBetweenMutativeRequests)
 
 				logger.Debug("creating empty commit list auto-close comment", "owner", githubPath[0], "repo", githubPath[1], "pr_number", giteaPullRequest.Index)
 				newComment := github.IssueComment{
@@ -966,6 +970,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 					sendErr(fmt.Errorf("creating empty commit list auto-close comment: %v", err))
 					failureCount++
 				}
+				time.Sleep(githubApiPauseBetweenMutativeRequests)
 			}
 
 			if giteaPullRequest.State == gitea.StateClosed {
@@ -977,6 +982,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 					failureCount++
 					continue
 				}
+				time.Sleep(githubApiPauseBetweenMutativeRequests)
 			}
 
 		} else {
@@ -999,6 +1005,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 					failureCount++
 					continue
 				}
+				time.Sleep(githubApiPauseBetweenMutativeRequests)
 			}
 
 			if (newState != nil && (githubPullRequest.State == nil || *githubPullRequest.State != *newState)) ||
@@ -1016,6 +1023,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 					failureCount++
 					continue
 				}
+				time.Sleep(githubApiPauseBetweenMutativeRequests)
 			} else {
 				logger.Trace("existing pull request is up-to-date", "owner", githubPath[0], "repo", githubPath[1], "pr_number", githubPullRequest.GetNumber())
 			}
@@ -1133,6 +1141,7 @@ func migrateItemComments(ctx context.Context, githubPath, giteaPath []string, gi
 						// TODO: think about whether to allow "!foundExistingComment" branch to create a new comment on error; previously loop-break instead of return
 						return fmt.Errorf("updating comments: %v", err)
 					}
+					time.Sleep(githubApiPauseBetweenMutativeRequests)
 				}
 			} else {
 				logger.Trace("existing comment is up-to-date", "owner", githubPath[0], "repo", githubPath[1], "item_id", githubItemId, "comment_id", githubComment.GetID())
@@ -1147,6 +1156,7 @@ func migrateItemComments(ctx context.Context, githubPath, giteaPath []string, gi
 			if _, _, err = gh.Issues.CreateComment(ctx, githubPath[0], githubPath[1], githubItemId, &newComment); err != nil {
 				return fmt.Errorf("creating comment for gitea item #%d (#%d): %v", giteaItemId, githubItemId, err)
 			}
+			time.Sleep(githubApiPauseBetweenMutativeRequests)
 		}
 	}
 
