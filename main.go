@@ -562,13 +562,13 @@ func migrateProject(ctx context.Context, proj []string) error {
 	}
 
 	if enablePullRequests {
-		migratePullRequests(ctx, githubPath, giteaPath, defaultBranch, giteaRepository, gitRepo)
+		migratePullRequests(ctx, githubPath, giteaPath, defaultBranch, giteaRepository, gitRepo, createRepo)
 	}
 
 	return nil
 }
 
-func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, defaultBranch string, giteaRepository *gitea.Repository, gitRepo *git.Repository) {
+func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, defaultBranch string, giteaRepository *gitea.Repository, gitRepo *git.Repository, initialMigration bool) {
 	giteaPullRequests, err := getAllGiteaPullRequests(ctx, giteaPath[0], giteaPath[1])
 	if err != nil {
 		sendErr(err)
@@ -619,58 +619,60 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 			tmpEmptyCommitRequired = true
 		}
 
-		logger.Debug("searching for any existing pull request", "owner", githubPath[0], "repo", githubPath[1], "pr_number", giteaPullRequest.Index)
-		sourceBranches := []string{giteaPullRequest.Head.Ref, sourceBranchForClosedPullRequest}
-		branchQuery := fmt.Sprintf("head:%s", strings.Join(sourceBranches, " OR head:"))
-		query := fmt.Sprintf("repo:%s/%s AND is:pr AND (%s)", githubPath[0], githubPath[1], branchQuery)
-		searchResult, err := getGithubSearchResults(ctx, query)
-		if err != nil {
-			sendErr(fmt.Errorf("listing pull requests: %v", err))
-			continue
-		}
-
-		// Look for an existing GitHub pull request
-		skip := false
-		for _, issue := range searchResult.Issues {
-			if issue == nil {
+		if !initialMigration {
+			logger.Debug("searching for any existing pull request", "owner", githubPath[0], "repo", githubPath[1], "pr_number", giteaPullRequest.Index)
+			sourceBranches := []string{giteaPullRequest.Head.Ref, sourceBranchForClosedPullRequest}
+			branchQuery := fmt.Sprintf("head:%s", strings.Join(sourceBranches, " OR head:"))
+			query := fmt.Sprintf("repo:%s/%s AND is:pr AND (%s)", githubPath[0], githubPath[1], branchQuery)
+			searchResult, err := getGithubSearchResults(ctx, query)
+			if err != nil {
+				sendErr(fmt.Errorf("listing pull requests: %v", err))
 				continue
 			}
 
-			// Check for context cancellation
-			if err := ctx.Err(); err != nil {
-				sendErr(fmt.Errorf("preparing to retrieve pull request: %v", err))
-				break
-			}
+			// Look for an existing GitHub pull request
+			skip := false
+			for _, issue := range searchResult.Issues {
+				if issue == nil {
+					continue
+				}
 
-			if issue.IsPullRequest() {
-				// Extract the PR number from the URL
-				prUrl, err := url.Parse(*issue.PullRequestLinks.URL)
-				if err != nil {
-					sendErr(fmt.Errorf("parsing pull request url: %v", err))
-					skip = true
+				// Check for context cancellation
+				if err := ctx.Err(); err != nil {
+					sendErr(fmt.Errorf("preparing to retrieve pull request: %v", err))
 					break
 				}
 
-				if m := regexp.MustCompile(".+/([0-9]+)$").FindStringSubmatch(prUrl.Path); len(m) == 2 {
-					prNumber, _ := strconv.Atoi(m[1])
-					ghPr, err := getGithubPullRequest(ctx, githubPath[0], githubPath[1], prNumber)
+				if issue.IsPullRequest() {
+					// Extract the PR number from the URL
+					prUrl, err := url.Parse(*issue.PullRequestLinks.URL)
 					if err != nil {
-						sendErr(fmt.Errorf("retrieving pull request: %v", err))
+						sendErr(fmt.Errorf("parsing pull request url: %v", err))
 						skip = true
 						break
 					}
 
-					if strings.Contains(ghPr.GetBody(), fmt.Sprintf("**Gitea PR Number** | %d", giteaPullRequest.Index)) ||
-						strings.Contains(ghPr.GetBody(), fmt.Sprintf("**Gitea PR Number** | [%d]", giteaPullRequest.Index)) {
-						logger.Debug("found existing pull request", "owner", githubPath[0], "repo", githubPath[1], "pr_number", ghPr.GetNumber())
-						githubPullRequest = ghPr
-						break
+					if m := regexp.MustCompile(".+/([0-9]+)$").FindStringSubmatch(prUrl.Path); len(m) == 2 {
+						prNumber, _ := strconv.Atoi(m[1])
+						ghPr, err := getGithubPullRequest(ctx, githubPath[0], githubPath[1], prNumber)
+						if err != nil {
+							sendErr(fmt.Errorf("retrieving pull request: %v", err))
+							skip = true
+							break
+						}
+
+						if strings.Contains(ghPr.GetBody(), fmt.Sprintf("**Gitea PR Number** | %d", giteaPullRequest.Index)) ||
+							strings.Contains(ghPr.GetBody(), fmt.Sprintf("**Gitea PR Number** | [%d]", giteaPullRequest.Index)) {
+							logger.Debug("found existing pull request", "owner", githubPath[0], "repo", githubPath[1], "pr_number", ghPr.GetNumber())
+							githubPullRequest = ghPr
+							break
+						}
 					}
 				}
 			}
-		}
-		if skip {
-			continue
+			if skip {
+				continue
+			}
 		}
 
 		worktree, err := gitRepo.Worktree()
