@@ -282,7 +282,6 @@ func printReport(ctx context.Context, projects []Project) {
 
 		result, err := reportProject(ctx, proj)
 		if err != nil {
-			errCount++
 			sendErr(err)
 		}
 
@@ -345,7 +344,6 @@ func performMigration(ctx context.Context, projects []Project) error {
 				}
 
 				if err := migrateProject(ctx, proj); err != nil {
-					errCount++
 					sendErr(err)
 				}
 			}
