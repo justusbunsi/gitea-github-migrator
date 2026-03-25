@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-	"time"
 
 	"code.gitea.io/sdk/gitea"
 	"github.com/google/go-github/v74/github"
@@ -78,46 +77,6 @@ func getGithubUser(ctx context.Context, username string) (*github.User, error) {
 	return user, nil
 }
 
-func getGiteaUser(username string) (*gitea.User, error) {
-	user := cache.getGiteaUser(username)
-	if user == nil {
-		var users []*gitea.User
-		opts := gitea.AdminListUsersOptions{}
-		for {
-			result, resp, err := gi.AdminListUsers(opts)
-			if err != nil {
-				return nil, fmt.Errorf("retrieving gitea user list: %v", err)
-			}
-
-			users = append(users, result...)
-
-			if resp.NextPage == 0 {
-				break
-			}
-
-			opts.ListOptions.Page = resp.NextPage
-		}
-
-		var foundUser *gitea.User
-		for _, user = range users {
-			cache.setGiteaUser(user.UserName, *user)
-			if user.UserName == username {
-				foundUser = user
-			}
-		}
-
-		logger.Trace("pre-cached existing Gitea users", "count", len(users))
-
-		if foundUser == nil {
-			return nil, fmt.Errorf("gitea user not found: %s", username)
-		}
-
-		return foundUser, nil
-	}
-
-	return user, nil
-}
-
 func pointer[T any](v T) *T {
 	return &v
 }
@@ -127,25 +86,6 @@ func conditional[T any](cond bool, truthyValue, falsyValue T) T {
 		return truthyValue
 	}
 	return falsyValue
-}
-
-func roundDuration(d, r time.Duration) time.Duration {
-	if r <= 0 {
-		return d
-	}
-	neg := d < 0
-	if neg {
-		d = -d
-	}
-	if m := d % r; m+m < r {
-		d = d - m
-	} else {
-		d = d + r - m
-	}
-	if neg {
-		return -d
-	}
-	return d
 }
 
 func getAllGiteaPullRequests(ctx context.Context, owner, repo string) ([]*gitea.PullRequest, error) {
