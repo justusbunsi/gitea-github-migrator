@@ -272,7 +272,7 @@ func reportProject(ctx context.Context, proj []string) (*Report, error) {
 		return nil, fmt.Errorf("parsing project slugs: %v", err)
 	}
 
-	pullRequests, err := getAllGiteaPullRequests(ctx, giteaPath[0], giteaPath[1])
+	_, prCount, err := getAllGiteaPullRequests(ctx, giteaPath[0], giteaPath[1], true)
 	if err != nil {
 		return nil, err
 	}
@@ -280,7 +280,7 @@ func reportProject(ctx context.Context, proj []string) (*Report, error) {
 	return &Report{
 		OwnerName:         giteaPath[0],
 		RepoName:          giteaPath[1],
-		PullRequestsCount: len(pullRequests),
+		PullRequestsCount: prCount,
 	}, nil
 }
 
@@ -532,14 +532,13 @@ func migrateProject(ctx context.Context, proj []string) error {
 }
 
 func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, defaultBranch string, giteaRepository *gitea.Repository, gitRepo *git.Repository, initialMigration bool) {
-	giteaPullRequests, err := getAllGiteaPullRequests(ctx, giteaPath[0], giteaPath[1])
+	giteaPullRequests, totalCount, err := getAllGiteaPullRequests(ctx, giteaPath[0], giteaPath[1], false)
 	if err != nil {
 		sendErr(err)
 		return
 	}
 
 	var successCount, failureCount int
-	totalCount := len(giteaPullRequests)
 	logger.Info("migrating pull requests from Gitea to GitHub", "owner", giteaPath[0], "repo", giteaPath[1], "count", totalCount)
 	for _, giteaPullRequest := range giteaPullRequests {
 		if giteaPullRequest == nil {

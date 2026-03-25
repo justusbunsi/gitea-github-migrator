@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"code.gitea.io/sdk/gitea"
@@ -88,25 +89,48 @@ func conditional[T any](cond bool, truthyValue, falsyValue T) T {
 	return falsyValue
 }
 
-func getAllGiteaPullRequests(ctx context.Context, owner, repo string) ([]*gitea.PullRequest, error) {
+// getAllGiteaPullRequests has two modes: "actual retrieval" and "count".
+// In "actual retrieval" mode, it fetches all available PRs from Gitea.
+// In "count" mode it fetches the first page and returns only the "x-total-count" header.
+func getAllGiteaPullRequests(ctx context.Context, owner, repo string, countMode bool) ([]*gitea.PullRequest, int, error) {
 	var pullRequests []*gitea.PullRequest
+	var totalCount *int
+
+	logMessage := "retrieving Gitea pull requests"
 
 	opts := gitea.ListPullRequestsOptions{
 		State: gitea.StateAll,
 		Sort:  "oldest",
 	}
-
-	logger.Debug("retrieving Gitea pull requests", "owner", owner, "repo", repo)
+	if countMode {
+		opts.PageSize = 1
+		opts.Page = 1
+		logMessage = "retrieving Gitea pull request total count"
+		logger.Debug(logMessage, "owner", owner, "repo", repo)
+	} else {
+		logger.Info(logMessage, "owner", owner, "repo", repo)
+	}
 	for {
 		// Check for context cancellation
 		if err := ctx.Err(); err != nil {
-			sendErr(fmt.Errorf("retrieving Gitea pull requests: %v", err))
-			break
+			return nil, 0, fmt.Errorf("%s: %v", logMessage, err)
 		}
 
 		result, resp, err := gi.ListRepoPullRequests(owner, repo, opts)
 		if err != nil {
-			return nil, fmt.Errorf("retrieving gitea pull requests: %v", err)
+			return nil, 0, fmt.Errorf("%s: %v", logMessage, err)
+		}
+
+		if totalCount == nil {
+			c, err := strconv.Atoi(resp.Header.Get("x-total-count"))
+			if err != nil {
+				return nil, 0, fmt.Errorf("%s: unable to retrieve total count: %v", logMessage, err)
+			}
+			totalCount = &c
+		}
+
+		if countMode {
+			return nil, *totalCount, nil
 		}
 
 		pullRequests = append(pullRequests, result...)
@@ -118,7 +142,7 @@ func getAllGiteaPullRequests(ctx context.Context, owner, repo string) ([]*gitea.
 		opts.Page = resp.NextPage
 	}
 
-	return pullRequests, nil
+	return pullRequests, *totalCount, nil
 }
 
 // getGitHubAccountReference reads the Gitea account website property for any GitHub account references.
