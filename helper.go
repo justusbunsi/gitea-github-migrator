@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"code.gitea.io/sdk/gitea"
 	"github.com/google/go-github/v74/github"
@@ -87,6 +88,25 @@ func conditional[T any](cond bool, truthyValue, falsyValue T) T {
 		return truthyValue
 	}
 	return falsyValue
+}
+
+func roundDuration(d, r time.Duration) time.Duration {
+	if r <= 0 {
+		return d
+	}
+	neg := d < 0
+	if neg {
+		d = -d
+	}
+	if m := d % r; m+m < r {
+		d = d - m
+	} else {
+		d = d + r - m
+	}
+	if neg {
+		return -d
+	}
+	return d
 }
 
 // getAllGiteaPullRequests has two modes: "actual retrieval" and "count".
