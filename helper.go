@@ -1,16 +1,11 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 
 	"code.gitea.io/sdk/gitea"
 	"github.com/google/go-github/v74/github"
@@ -92,25 +87,6 @@ func conditional[T any](cond bool, truthyValue, falsyValue T) T {
 		return truthyValue
 	}
 	return falsyValue
-}
-
-func roundDuration(d, r time.Duration) time.Duration {
-	if r <= 0 {
-		return d
-	}
-	neg := d < 0
-	if neg {
-		d = -d
-	}
-	if m := d % r; m+m < r {
-		d = d - m
-	} else {
-		d = d + r - m
-	}
-	if neg {
-		return -d
-	}
-	return d
 }
 
 // getAllGiteaPullRequests has two modes: "actual retrieval" and "count".
@@ -222,34 +198,4 @@ func parseProjectSlugs(proj []string) ([]string, []string, error) {
 	}
 
 	return giteaPath, githubPath, nil
-}
-
-func unmarshalResp(resp *http.Response, model interface{}) error {
-	if resp == nil {
-		return nil
-	}
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("parsing response body: %+v", err)
-	}
-	defer resp.Body.Close()
-
-	// Trim away a BOM if present
-	respBody = bytes.TrimPrefix(respBody, []byte("\xef\xbb\xbf"))
-
-	// In some cases the respBody is empty, but not nil, so don't attempt to unmarshal this
-	if len(respBody) == 0 {
-		return nil
-	}
-
-	// Unmarshal into provided model
-	if err := json.Unmarshal(respBody, model); err != nil {
-		return fmt.Errorf("unmarshaling response body: %+v", err)
-	}
-
-	// Reassign the response body as downstream code may expect it
-	resp.Body = io.NopCloser(bytes.NewBuffer(respBody))
-
-	return nil
 }
