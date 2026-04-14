@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
@@ -196,4 +200,56 @@ func smartRenovateBodyTruncate(str string) string {
 		return str[:githubBodyLimit] + "..."
 	}
 	return fmt.Sprintf("%s%s%s%s", preNotes, releaseNotes[:availableLength], divider, postNotes)
+}
+
+func parseProjectSlugs(proj []string) ([]string, []string, error) {
+	if len(proj) != 2 {
+		return nil, nil, fmt.Errorf("too many fields")
+	}
+
+	delimPosition := strings.LastIndex(proj[0], "/")
+	giteaPath := []string{
+		proj[0][:delimPosition],
+		proj[0][delimPosition+1:],
+	}
+	githubPath := strings.Split(proj[1], "/")
+
+	if len(giteaPath) != 2 {
+		return nil, nil, fmt.Errorf("invalid Gitea project: %s", proj[0])
+	}
+	if len(githubPath) != 2 {
+		return nil, nil, fmt.Errorf("invalid GitHub project: %s", proj[1])
+	}
+
+	return giteaPath, githubPath, nil
+}
+
+func unmarshalResp(resp *http.Response, model interface{}) error {
+	if resp == nil {
+		return nil
+	}
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("parsing response body: %+v", err)
+	}
+	defer resp.Body.Close()
+
+	// Trim away a BOM if present
+	respBody = bytes.TrimPrefix(respBody, []byte("\xef\xbb\xbf"))
+
+	// In some cases the respBody is empty, but not nil, so don't attempt to unmarshal this
+	if len(respBody) == 0 {
+		return nil
+	}
+
+	// Unmarshal into provided model
+	if err := json.Unmarshal(respBody, model); err != nil {
+		return fmt.Errorf("unmarshaling response body: %+v", err)
+	}
+
+	// Reassign the response body as downstream code may expect it
+	resp.Body = io.NopCloser(bytes.NewBuffer(respBody))
+
+	return nil
 }
