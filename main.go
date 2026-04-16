@@ -29,18 +29,10 @@ import (
 	"github.com/google/go-github/v74/github"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-retryablehttp"
+	"github.com/justusbunsi/gitea-github-migrator/internal/constants"
 	h "github.com/justusbunsi/gitea-github-migrator/internal/helpers"
 	"github.com/justusbunsi/gitea-github-migrator/internal/migration"
 	"github.com/justusbunsi/gitea-github-migrator/internal/retry_client"
-)
-
-const (
-	dateFormat          = "Mon, 2 Jan 2006"
-	defaultGithubDomain = "github.com"
-	defaultGiteaDomain  = "gitea.com"
-	githubBodyLimit     = 58000
-	// See https://docs.github.com/en/enterprise-cloud@latest/rest/using-the-rest-api/best-practices-for-using-the-rest-api?apiVersion=2026-03-10#pause-between-mutative-requests
-	githubApiPauseBetweenMutativeRequests = 1 * time.Second
 )
 
 var loop, report bool
@@ -118,10 +110,10 @@ func main() {
 	flag.BoolVar(&enablePullRequests, "migrate-pull-requests", false, "whether pull requests should be migrated")
 	flag.BoolVar(&renameMasterToMain, "rename-master-to-main", false, "rename master branch to main and update pull requests (incompatible with -rename-trunk-branch)")
 
-	flag.StringVar(&githubDomain, "github-domain", defaultGithubDomain, "specifies the GitHub domain to use")
+	flag.StringVar(&githubDomain, "github-domain", constants.DefaultGithubDomain, "specifies the GitHub domain to use")
 	flag.StringVar(&githubRepo, "github-repo", "", "the GitHub repository to migrate to")
 	flag.StringVar(&githubUser, "github-user", "", "specifies the GitHub user to use, who will author any migrated PRs (required)")
-	flag.StringVar(&giteaDomain, "gitea-domain", defaultGiteaDomain, "specifies the Gitea domain to use")
+	flag.StringVar(&giteaDomain, "gitea-domain", constants.DefaultGiteaDomain, "specifies the Gitea domain to use")
 	flag.StringVar(&giteaProject, "gitea-project", "", "the Gitea project to migrate")
 	flag.StringVar(&projectsCsvPath, "projects-csv", "", "specifies the path to a CSV file describing projects to migrate (incompatible with -gitea-project and -github-repo)")
 	flag.StringVar(&renameTrunkBranch, "rename-trunk-branch", "", "specifies the new trunk branch name (incompatible with -rename-master-to-main)")
@@ -159,7 +151,7 @@ func main() {
 	}
 	client := githubpagination.NewClient(transport, githubpagination.WithPerPage(100))
 
-	if githubDomain == defaultGithubDomain {
+	if githubDomain == constants.DefaultGithubDomain {
 		gh = github.NewClient(client).WithAuthToken(githubToken)
 	} else {
 		githubUrl := fmt.Sprintf("https://%s", githubDomain)
@@ -804,9 +796,9 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 		closeDetails := ""
 		if giteaPullRequest.State == gitea.StateClosed {
 			if giteaPullRequest.HasMerged && giteaPullRequest.Merged != nil {
-				closeDetails = fmt.Sprintf("\n> | **Date Originally Merged** | %s |\n> | **Original Merger** | %s |\n> | **Merge Commit** | %s |", giteaPullRequest.Merged.Format(dateFormat), giteaPullRequest.MergedBy.UserName, *giteaPullRequest.MergedCommitID)
+				closeDetails = fmt.Sprintf("\n> | **Date Originally Merged** | %s |\n> | **Original Merger** | %s |\n> | **Merge Commit** | %s |", giteaPullRequest.Merged.Format(constants.DateFormat), giteaPullRequest.MergedBy.UserName, *giteaPullRequest.MergedCommitID)
 			} else if giteaPullRequest.Closed != nil {
-				closeDetails = fmt.Sprintf("\n> | **Date Originally Closed** | %s |", giteaPullRequest.Closed.Format(dateFormat))
+				closeDetails = fmt.Sprintf("\n> | **Date Originally Closed** | %s |", giteaPullRequest.Closed.Format(constants.DateFormat))
 			}
 		}
 
@@ -827,11 +819,11 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 
 ## Original Description
 
-%[3]s`, getGitHubAccountReference(giteaPullRequest.Poster), giteaPullRequest.Index, description, entry.GiteaOwner, entry.GiteaRepo, giteaPullRequest.Created.Format(dateFormat), closeDetails, approval, originalState, giteaDomain, giteaPullRequest.Title)
+%[3]s`, getGitHubAccountReference(giteaPullRequest.Poster), giteaPullRequest.Index, description, entry.GiteaOwner, entry.GiteaRepo, giteaPullRequest.Created.Format(constants.DateFormat), closeDetails, approval, originalState, giteaDomain, giteaPullRequest.Title)
 
-		if len(body) > githubBodyLimit {
+		if len(body) > constants.GithubBodyLimit {
 			entry.Logger.Warn("pull request body was truncated due to platform limits", "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
-			body = h.SmartRenovateBodyTruncate(body, githubBodyLimit)
+			body = h.SmartRenovateBodyTruncate(body)
 		}
 
 		if githubPullRequest == nil {
@@ -849,7 +841,7 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 				failureCount++
 				continue
 			}
-			time.Sleep(githubApiPauseBetweenMutativeRequests)
+			time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
 
 			if tmpEmptyCommitRequired {
 				entry.Logger.Debug("reset empty commit list pull request branch to actual commit", "pr_number", giteaPullRequest.Index, "source_branch", giteaPullRequest.Head.Ref, "actual_commit", prHeadRef)
@@ -892,7 +884,7 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 					failureCount++
 					continue
 				}
-				time.Sleep(githubApiPauseBetweenMutativeRequests)
+				time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
 
 				entry.Logger.Debug("creating empty commit list auto-close comment", "pr_number", giteaPullRequest.Index)
 				newComment := github.IssueComment{
@@ -904,7 +896,7 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 					sendErr(fmt.Errorf("creating empty commit list auto-close comment: %v", err))
 					failureCount++
 				}
-				time.Sleep(githubApiPauseBetweenMutativeRequests)
+				time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
 			}
 
 			if giteaPullRequest.State == gitea.StateClosed {
@@ -916,7 +908,7 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 					failureCount++
 					continue
 				}
-				time.Sleep(githubApiPauseBetweenMutativeRequests)
+				time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
 			}
 
 		} else {
@@ -939,7 +931,7 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 					failureCount++
 					continue
 				}
-				time.Sleep(githubApiPauseBetweenMutativeRequests)
+				time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
 			}
 
 			if (newState != nil && (githubPullRequest.State == nil || *githubPullRequest.State != *newState)) ||
@@ -957,7 +949,7 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 					failureCount++
 					continue
 				}
-				time.Sleep(githubApiPauseBetweenMutativeRequests)
+				time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
 			} else {
 				entry.Logger.Trace("existing pull request is up-to-date", "pr_number", githubPullRequest.GetNumber())
 			}
@@ -1052,11 +1044,11 @@ func migrateItemComments(ctx context.Context, entry *migration.Entry, giteaRepos
 
 ## Original Comment
 
-%[4]s`, getGitHubAccountReference(comment.Poster), comment.ID, comment.Created.Format(dateFormat), comment.Body)
-		if len(commentBody) > githubBodyLimit {
+%[4]s`, getGitHubAccountReference(comment.Poster), comment.ID, comment.Created.Format(constants.DateFormat), comment.Body)
+		if len(commentBody) > constants.GithubBodyLimit {
 			entry.Logger.Warn("comment was truncated due to platform limits", "gitea_item", giteaItemId, "github_item", githubItemId, "comment_id", comment.ID)
 			commentBody = strings.ReplaceAll(commentBody, "This comment was migrated from Gitea", "This comment was migrated from Gitea **and was truncated due to platform limits**")
-			commentBody = commentBody[:githubBodyLimit] + "..."
+			commentBody = commentBody[:constants.GithubBodyLimit] + "..."
 		}
 
 		foundExistingComment := false
@@ -1075,7 +1067,7 @@ func migrateItemComments(ctx context.Context, entry *migration.Entry, giteaRepos
 						// TODO: think about whether to allow "!foundExistingComment" branch to create a new comment on error; previously loop-break instead of return
 						return fmt.Errorf("updating comments: %v", err)
 					}
-					time.Sleep(githubApiPauseBetweenMutativeRequests)
+					time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
 				}
 			} else {
 				entry.Logger.Trace("existing comment is up-to-date", "item_id", githubItemId, "comment_id", githubComment.GetID())
@@ -1090,7 +1082,7 @@ func migrateItemComments(ctx context.Context, entry *migration.Entry, giteaRepos
 			if _, _, err = gh.Issues.CreateComment(ctx, entry.GitHubOwner, entry.GitHubRepo, githubItemId, &newComment); err != nil {
 				return fmt.Errorf("creating comment for gitea item #%d (#%d): %v", giteaItemId, githubItemId, err)
 			}
-			time.Sleep(githubApiPauseBetweenMutativeRequests)
+			time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
 		}
 	}
 
