@@ -39,3 +39,12 @@ func SmartRenovateBodyTruncate(str string, githubBodyLimit int) string {
 	}
 	return fmt.Sprintf("%s%s%s%s", preNotes, releaseNotes[:availableLength], divider, postNotes)
 }
+
+func ParseProjectSlug(slug string) (owner, repo string, err error) {
+	delimPosition := strings.LastIndex(slug, "/")
+	if delimPosition == -1 {
+		return "", "", fmt.Errorf("missing owner/repo delimiter (slash): %s", slug)
+	}
+
+	return slug[:delimPosition], slug[delimPosition+1:], nil
+}

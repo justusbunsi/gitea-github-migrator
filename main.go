@@ -30,6 +30,7 @@ import (
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-retryablehttp"
 	h "github.com/justusbunsi/gitea-github-migrator/internal/helpers"
+	"github.com/justusbunsi/gitea-github-migrator/internal/migration"
 	"github.com/justusbunsi/gitea-github-migrator/internal/retry_client"
 )
 
@@ -240,19 +241,19 @@ func printReport(ctx context.Context, projects []Project) {
 }
 
 func reportProject(ctx context.Context, proj []string) (*Report, error) {
-	giteaPath, _, err := parseProjectSlugs(proj)
+	entry, err := migration.NewEntry(proj[0], proj[1], gi, logger)
 	if err != nil {
-		return nil, fmt.Errorf("parsing project slugs: %v", err)
+		return nil, err
 	}
 
-	_, prCount, err := getAllGiteaPullRequests(ctx, giteaPath[0], giteaPath[1], true)
+	_, prCount, err := entry.GetAllGiteaPullRequests(ctx, true)
 	if err != nil {
 		return nil, err
 	}
 
 	return &Report{
-		OwnerName:         giteaPath[0],
-		RepoName:          giteaPath[1],
+		OwnerName:         entry.GiteaOwner,
+		RepoName:          entry.GiteaRepo,
 		PullRequestsCount: prCount,
 	}, nil
 }
@@ -316,13 +317,13 @@ func performMigration(ctx context.Context, projects []Project) error {
 }
 
 func migrateProject(ctx context.Context, proj []string) error {
-	giteaPath, githubPath, err := parseProjectSlugs(proj)
+	entry, err := migration.NewEntry(proj[0], proj[1], gi, logger)
 	if err != nil {
-		return fmt.Errorf("parsing project slugs: %v", err)
+		return err
 	}
 
-	logger.Info("searching for Gitea repository", "gitea_owner", giteaPath[0], "gitea_repo", giteaPath[1])
-	giteaRepository, _, err := gi.GetRepo(giteaPath[0], giteaPath[1])
+	entry.Logger.Info("searching for Gitea repository")
+	giteaRepository, _, err := gi.GetRepo(entry.GiteaOwner, entry.GiteaRepo)
 	if err != nil {
 		return fmt.Errorf("retrieve gitea repository: %v", err)
 	}
@@ -336,22 +337,22 @@ func migrateProject(ctx context.Context, proj []string) error {
 		return fmt.Errorf("parsing clone URL: %v", err)
 	}
 
-	logger.Info("mirroring repository from Gitea to GitHub", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "github", fmt.Sprintf("%s/%s", githubPath[0], githubPath[1]))
+	entry.Logger.Info("mirroring repository from Gitea to GitHub")
 
-	user, err := getGithubUser(ctx, githubPath[0])
+	user, err := getGithubUser(ctx, entry.GitHubOwner)
 	if err != nil {
 		return fmt.Errorf("retrieving github user: %v", err)
 	}
 
 	var org string
 	if strings.EqualFold(*user.Type, "organization") {
-		org = githubPath[0]
-	} else if !strings.EqualFold(*user.Type, "user") || !strings.EqualFold(*user.Login, githubPath[0]) {
-		return fmt.Errorf("configured owner is neither an organization nor the current user: %s", githubPath[0])
+		org = entry.GitHubOwner
+	} else if !strings.EqualFold(*user.Type, "user") || !strings.EqualFold(*user.Login, entry.GitHubOwner) {
+		return fmt.Errorf("configured owner is neither an organization nor the current user: %s", entry.GitHubOwner)
 	}
 
-	logger.Debug("checking for existing repository on GitHub", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "github", fmt.Sprintf("%s/%s", githubPath[0], githubPath[1]))
-	_, _, err = gh.Repositories.Get(ctx, githubPath[0], githubPath[1])
+	entry.Logger.Debug("checking for existing repository on GitHub")
+	_, _, err = gh.Repositories.Get(ctx, entry.GitHubOwner, entry.GitHubRepo)
 
 	var githubError *github.ErrorResponse
 	if err != nil && (!errors.As(err, &githubError) || githubError == nil || githubError.Response == nil || githubError.Response.StatusCode != http.StatusNotFound) {
@@ -362,8 +363,8 @@ func migrateProject(ctx context.Context, proj []string) error {
 	if err != nil {
 		createRepo = true
 	} else if deleteExistingRepos {
-		logger.Warn("existing repository was found on GitHub, proceeding to delete", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "github", fmt.Sprintf("%s/%s", githubPath[0], githubPath[1]))
-		if _, err = gh.Repositories.Delete(ctx, githubPath[0], githubPath[1]); err != nil {
+		entry.Logger.Warn("existing repository was found on GitHub, proceeding to delete")
+		if _, err = gh.Repositories.Delete(ctx, entry.GitHubOwner, entry.GitHubRepo); err != nil {
 			return fmt.Errorf("deleting existing github repo: %v", err)
 		}
 
@@ -378,16 +379,16 @@ func migrateProject(ctx context.Context, proj []string) error {
 		defaultBranch = giteaRepository.DefaultBranch
 	}
 
-	homepage := fmt.Sprintf("https://%s/%s/%s", giteaDomain, giteaPath[0], giteaPath[1])
+	homepage := fmt.Sprintf("https://%s/%s/%s", giteaDomain, entry.GiteaOwner, entry.GiteaRepo)
 
 	if createRepo {
 		if repoDeleted {
-			logger.Warn("recreating GitHub repository", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "github", fmt.Sprintf("%s/%s", githubPath[0], githubPath[1]))
+			entry.Logger.Warn("recreating GitHub repository")
 		} else {
-			logger.Debug("repository not found on GitHub, proceeding to create", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "github", fmt.Sprintf("%s/%s", githubPath[0], githubPath[1]))
+			entry.Logger.Debug("repository not found on GitHub, proceeding to create")
 		}
 		newRepo := github.Repository{
-			Name:          h.Pointer(githubPath[1]),
+			Name:          h.Pointer(entry.GitHubRepo),
 			Description:   &giteaRepository.Description,
 			Homepage:      &homepage,
 			DefaultBranch: &defaultBranch,
@@ -401,10 +402,10 @@ func migrateProject(ctx context.Context, proj []string) error {
 		}
 	}
 
-	logger.Debug("updating repository settings", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "github", fmt.Sprintf("%s/%s", githubPath[0], githubPath[1]))
+	entry.Logger.Debug("updating repository settings")
 	description := regexp.MustCompile("\r|\n").ReplaceAllString(giteaRepository.Description, " ")
 	updateRepo := github.Repository{
-		Name:              h.Pointer(githubPath[1]),
+		Name:              h.Pointer(entry.GitHubRepo),
 		Description:       &description,
 		Homepage:          &homepage,
 		AllowAutoMerge:    h.Pointer(true),
@@ -413,7 +414,7 @@ func migrateProject(ctx context.Context, proj []string) error {
 		AllowSquashMerge:  h.Pointer(true),
 		AllowUpdateBranch: h.Pointer(true),
 	}
-	if _, _, err = gh.Repositories.Edit(ctx, githubPath[0], githubPath[1], &updateRepo); err != nil {
+	if _, _, err = gh.Repositories.Edit(ctx, entry.GitHubOwner, entry.GitHubRepo, &updateRepo); err != nil {
 		return fmt.Errorf("updating github repo: %v", err)
 	}
 
@@ -423,7 +424,7 @@ func migrateProject(ctx context.Context, proj []string) error {
 	// In-memory filesystem for worktree operations
 	fs := memfs.New()
 
-	logger.Debug("cloning repository", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "url", giteaRepository.CloneURL)
+	entry.Logger.Debug("cloning repository", "url", giteaRepository.CloneURL)
 	gitRepo, err := git.CloneContext(ctx, memory.NewStorage(), fs, &git.CloneOptions{
 		URL:        cloneUrlWithCredentials,
 		Auth:       nil,
@@ -436,25 +437,25 @@ func migrateProject(ctx context.Context, proj []string) error {
 
 	if defaultBranch != giteaRepository.DefaultBranch {
 		if giteaTrunk, err := gitRepo.Reference(plumbing.NewBranchReferenceName(giteaRepository.DefaultBranch), false); err == nil {
-			logger.Info("renaming trunk branch prior to push", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "gitea_trunk", giteaRepository.DefaultBranch, "github_trunk", defaultBranch, "sha", giteaTrunk.Hash())
+			entry.Logger.Info("renaming trunk branch prior to push", "gitea_trunk", giteaRepository.DefaultBranch, "github_trunk", defaultBranch, "sha", giteaTrunk.Hash())
 
-			logger.Debug("creating new trunk branch", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "github_trunk", defaultBranch, "sha", giteaTrunk.Hash())
+			entry.Logger.Debug("creating new trunk branch", "github_trunk", defaultBranch, "sha", giteaTrunk.Hash())
 			githubTrunk := plumbing.NewHashReference(plumbing.NewBranchReferenceName(defaultBranch), giteaTrunk.Hash())
 			if err = gitRepo.Storer.SetReference(githubTrunk); err != nil {
 				return fmt.Errorf("creating trunk branch: %v", err)
 			}
 
-			logger.Debug("deleting old trunk branch", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "gitea_trunk", giteaRepository.DefaultBranch, "sha", giteaTrunk.Hash())
+			entry.Logger.Debug("deleting old trunk branch", "gitea_trunk", giteaRepository.DefaultBranch, "sha", giteaTrunk.Hash())
 			if err = gitRepo.Storer.RemoveReference(giteaTrunk.Name()); err != nil {
 				return fmt.Errorf("deleting old trunk branch: %v", err)
 			}
 		}
 	}
 
-	githubUrl := fmt.Sprintf("https://%s/%s/%s", githubDomain, githubPath[0], githubPath[1])
-	githubUrlWithCredentials := fmt.Sprintf("https://%s:%s@%s/%s/%s", githubUser, githubToken, githubDomain, githubPath[0], githubPath[1])
+	githubUrl := fmt.Sprintf("https://%s/%s/%s", githubDomain, entry.GitHubOwner, entry.GitHubRepo)
+	githubUrlWithCredentials := fmt.Sprintf("https://%s:%s@%s/%s/%s", githubUser, githubToken, githubDomain, entry.GitHubOwner, entry.GitHubRepo)
 
-	logger.Debug("adding remote for GitHub repository", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "url", githubUrl)
+	entry.Logger.Debug("adding remote for GitHub repository", "url", githubUrl)
 	if _, err = gitRepo.CreateRemote(&config.RemoteConfig{
 		Name:   "github",
 		URLs:   []string{githubUrlWithCredentials},
@@ -463,56 +464,56 @@ func migrateProject(ctx context.Context, proj []string) error {
 		return fmt.Errorf("adding github remote: %v", err)
 	}
 
-	logger.Debug("force-pushing to GitHub repository", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "url", githubUrl)
+	entry.Logger.Debug("force-pushing to GitHub repository", "url", githubUrl)
 	if err = gitRepo.PushContext(ctx, &git.PushOptions{
 		RemoteName: "github",
 		Force:      true,
 		//Prune:      true, // causes error, attempts to delete main branch
 	}); err != nil {
 		if errors.Is(err, git.NoErrAlreadyUpToDate) {
-			logger.Debug("repository already up-to-date on GitHub", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "url", githubUrl)
+			entry.Logger.Debug("repository already up-to-date on GitHub", "url", githubUrl)
 		} else {
 			return fmt.Errorf("pushing to github repo: %v", err)
 		}
 	}
 
-	logger.Debug("pushing tags to GitHub repository", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "url", githubUrl)
+	entry.Logger.Debug("pushing tags to GitHub repository", "url", githubUrl)
 	if err = gitRepo.PushContext(ctx, &git.PushOptions{
 		RemoteName: "github",
 		Force:      true,
 		RefSpecs:   []config.RefSpec{"refs/tags/*:refs/tags/*"},
 	}); err != nil {
 		if errors.Is(err, git.NoErrAlreadyUpToDate) {
-			logger.Debug("repository already up-to-date on GitHub", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "url", githubUrl)
+			entry.Logger.Debug("repository already up-to-date on GitHub", "url", githubUrl)
 		} else {
 			return fmt.Errorf("pushing to github repo: %v", err)
 		}
 	}
 
-	logger.Debug("setting default repository branch", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "github", fmt.Sprintf("%s/%s", githubPath[0], githubPath[1]), "branch_name", defaultBranch)
+	entry.Logger.Debug("setting default repository branch", "branch_name", defaultBranch)
 	updateRepo = github.Repository{
 		DefaultBranch: &defaultBranch,
 	}
-	if _, _, err = gh.Repositories.Edit(ctx, githubPath[0], githubPath[1], &updateRepo); err != nil {
+	if _, _, err = gh.Repositories.Edit(ctx, entry.GitHubOwner, entry.GitHubRepo, &updateRepo); err != nil {
 		return fmt.Errorf("setting default branch: %v", err)
 	}
 
 	if enablePullRequests {
-		migratePullRequests(ctx, githubPath, giteaPath, defaultBranch, giteaRepository, gitRepo, createRepo)
+		migratePullRequests(ctx, entry, defaultBranch, giteaRepository, gitRepo, createRepo)
 	}
 
 	return nil
 }
 
-func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, defaultBranch string, giteaRepository *gitea.Repository, gitRepo *git.Repository, initialMigration bool) {
-	giteaPullRequests, totalCount, err := getAllGiteaPullRequests(ctx, giteaPath[0], giteaPath[1], false)
+func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBranch string, giteaRepository *gitea.Repository, gitRepo *git.Repository, initialMigration bool) {
+	giteaPullRequests, totalCount, err := entry.GetAllGiteaPullRequests(ctx, false)
 	if err != nil {
 		sendErr(err)
 		return
 	}
 
 	var successCount, failureCount int
-	logger.Info("migrating pull requests from Gitea to GitHub", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "count", totalCount)
+	entry.Logger.Info("migrating pull requests from Gitea to GitHub", "count", totalCount)
 	for _, giteaPullRequest := range giteaPullRequests {
 		if giteaPullRequest == nil {
 			continue
@@ -534,8 +535,8 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 
 		var cleanUpBranch, tmpEmptyCommitRequired bool
 		var githubPullRequest *github.PullRequest
-		logger.Trace("retrieve pull request head ref", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "pr_number", giteaPullRequest.Index)
-		prHeadRefs, _, err := gi.GetRepoRefs(giteaPath[0], giteaPath[1], fmt.Sprintf("pull/%d/head", giteaPullRequest.Index))
+		entry.Logger.Trace("retrieve pull request head ref", "pr_number", giteaPullRequest.Index)
+		prHeadRefs, _, err := gi.GetRepoRefs(entry.GiteaOwner, entry.GiteaRepo, fmt.Sprintf("pull/%d/head", giteaPullRequest.Index))
 		if err != nil {
 			sendErr(fmt.Errorf("retrieve head ref for pull request %d: %v", giteaPullRequest.Index, err))
 			failureCount++
@@ -550,15 +551,15 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 
 		// Some pull requests have no commits, flag these for later handling
 		if strings.EqualFold(giteaPullRequest.MergeBase, prHeadRef) {
-			logger.Debug("pull request with empty commit list", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "pr_number", giteaPullRequest.Index)
+			entry.Logger.Debug("pull request with empty commit list", "pr_number", giteaPullRequest.Index)
 			tmpEmptyCommitRequired = true
 		}
 
 		if !initialMigration {
-			logger.Debug("searching for any existing pull request", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "github", fmt.Sprintf("%s/%s", githubPath[0], githubPath[1]), "pr_number", giteaPullRequest.Index)
+			entry.Logger.Debug("searching for any existing pull request", "pr_number", giteaPullRequest.Index)
 			sourceBranches := []string{giteaPullRequest.Head.Ref, sourceBranchForClosedPullRequest}
 			branchQuery := fmt.Sprintf("head:%s", strings.Join(sourceBranches, " OR head:"))
-			query := fmt.Sprintf("repo:%s/%s AND is:pr AND (%s)", githubPath[0], githubPath[1], branchQuery)
+			query := fmt.Sprintf("repo:%s/%s AND is:pr AND (%s)", entry.GitHubOwner, entry.GitHubRepo, branchQuery)
 			searchResult, err := getGithubSearchResults(ctx, query)
 			if err != nil {
 				sendErr(fmt.Errorf("listing pull requests: %v", err))
@@ -589,7 +590,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 
 					if m := regexp.MustCompile(".+/([0-9]+)$").FindStringSubmatch(prUrl.Path); len(m) == 2 {
 						prNumber, _ := strconv.Atoi(m[1])
-						ghPr, err := getGithubPullRequest(ctx, githubPath[0], githubPath[1], prNumber)
+						ghPr, err := getGithubPullRequest(ctx, entry.GitHubOwner, entry.GitHubRepo, prNumber)
 						if err != nil {
 							sendErr(fmt.Errorf("retrieving pull request: %v", err))
 							skip = true
@@ -598,7 +599,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 
 						if strings.Contains(ghPr.GetBody(), fmt.Sprintf("**Gitea PR Number** | %d", giteaPullRequest.Index)) ||
 							strings.Contains(ghPr.GetBody(), fmt.Sprintf("**Gitea PR Number** | [%d]", giteaPullRequest.Index)) {
-							logger.Debug("found existing pull request", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "github", fmt.Sprintf("%s/%s", githubPath[0], githubPath[1]), "pr_number", ghPr.GetNumber())
+							entry.Logger.Debug("found existing pull request", "pr_number", ghPr.GetNumber())
 							githubPullRequest = ghPr
 							break
 						}
@@ -618,7 +619,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 		}
 
 		if githubPullRequest == nil {
-			logger.Trace("loading pull request head commit", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "pr_number", giteaPullRequest.Index, "head_sha", prHeadRef)
+			entry.Logger.Trace("loading pull request head commit", "pr_number", giteaPullRequest.Index, "head_sha", prHeadRef)
 			prHeadHash := plumbing.NewHash(prHeadRef)
 			prHeadCommit, err := object.GetCommit(gitRepo.Storer, prHeadHash)
 			if err != nil {
@@ -626,7 +627,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 				failureCount++
 				continue
 			}
-			logger.Trace("loading merge base", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "pr_number", giteaPullRequest.Index, "pr_merge_base", giteaPullRequest.MergeBase)
+			entry.Logger.Trace("loading merge base", "pr_number", giteaPullRequest.Index, "pr_merge_base", giteaPullRequest.MergeBase)
 			mergeBaseHash := plumbing.NewHash(giteaPullRequest.MergeBase)
 			mergeBaseCommit, err := object.GetCommit(gitRepo.Storer, mergeBaseHash)
 			if err != nil {
@@ -634,7 +635,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 				failureCount++
 				continue
 			}
-			logger.Trace("detecting best common ancestor", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "pr_number", giteaPullRequest.Index, "base", mergeBaseHash, "head", prHeadHash)
+			entry.Logger.Trace("detecting best common ancestor", "pr_number", giteaPullRequest.Index, "base", mergeBaseHash, "head", prHeadHash)
 			bases, err := mergeBaseCommit.MergeBase(prHeadCommit)
 			if err != nil {
 				sendErr(fmt.Errorf("detecting best common ancestor: %v", err))
@@ -642,12 +643,12 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 				continue
 			}
 			if len(bases) == 0 {
-				logger.Trace("orphaned head commit detected", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "pr_number", giteaPullRequest.Index, "sha", prHeadHash)
+				entry.Logger.Trace("orphaned head commit detected", "pr_number", giteaPullRequest.Index, "sha", prHeadHash)
 				tmpEmptyCommitRequired = true
 			}
 
 			if tmpEmptyCommitRequired {
-				logger.Trace("checkout source branch for empty commit list pull request", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index)
+				entry.Logger.Trace("checkout source branch for empty commit list pull request", "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index)
 				if err = worktree.Checkout(&git.CheckoutOptions{
 					Create: h.Conditional(giteaPullRequest.State == gitea.StateOpen, false, true),
 					Force:  true,
@@ -659,14 +660,14 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 				}
 
 				resetHash := h.Conditional(len(bases) == 0, mergeBaseHash, prHeadHash)
-				logger.Trace("reset worktree for migrator-required empty commit", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "pr_number", giteaPullRequest.Index, "reset_to_sha", resetHash)
+				entry.Logger.Trace("reset worktree for migrator-required empty commit", "pr_number", giteaPullRequest.Index, "reset_to_sha", resetHash)
 				if err = worktree.Reset(&git.ResetOptions{Mode: git.HardReset, Commit: resetHash}); err != nil {
 					sendErr(fmt.Errorf("reset empty commit list pull request branch: %v", err))
 					failureCount++
 					continue
 				}
 
-				logger.Debug("creating empty migration commit", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "github", fmt.Sprintf("%s/%s", githubPath[0], githubPath[1]), "pr_number", giteaPullRequest.Index)
+				entry.Logger.Debug("creating empty migration commit", "pr_number", giteaPullRequest.Index)
 				prHeadHash, err = worktree.Commit("Migrator-required empty commit", &git.CommitOptions{
 					AllowEmptyCommits: true,
 					Author: &object.Signature{
@@ -687,7 +688,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 				}
 
 				if strings.EqualFold(string(giteaPullRequest.State), string(gitea.StateOpen)) {
-					logger.Trace("pushing source branch for empty commit list pull request", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index)
+					entry.Logger.Trace("pushing source branch for empty commit list pull request", "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index)
 
 					if err = gitRepo.PushContext(ctx, &git.PushOptions{
 						RemoteName: "github",
@@ -697,7 +698,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 						Force: true,
 					}); err != nil {
 						if errors.Is(err, git.NoErrAlreadyUpToDate) {
-							logger.Trace("empty commit list branch already exists and is up-to-date on GitHub", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "github", fmt.Sprintf("%s/%s", githubPath[0], githubPath[1]), "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
+							entry.Logger.Trace("empty commit list branch already exists and is up-to-date on GitHub", "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
 						} else {
 							sendErr(fmt.Errorf("pushing temporary empty commit list branch to github: %v", err))
 							failureCount++
@@ -709,13 +710,13 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 
 			// Proceed to create temporary branches when migrating a merged/closed merge request that doesn't yet have a counterpart PR in GitHub (can't create one without a branch)
 			if !strings.EqualFold(string(giteaPullRequest.State), string(gitea.StateOpen)) {
-				logger.Trace("searching for existing branch for closed/merged pull request", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index, "source_branch", giteaPullRequest.Head.Ref)
+				entry.Logger.Trace("searching for existing branch for closed/merged pull request", "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index, "source_branch", giteaPullRequest.Head.Ref)
 
 				// Generate temporary branch names
 				giteaPullRequest.Head.Ref = sourceBranchForClosedPullRequest
 				giteaPullRequest.Base.Ref = targetBranchForClosedPullRequest
 
-				logger.Trace("creating target branch for merged/closed pull request", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index, "branch", giteaPullRequest.Base.Ref, "sha", mergeBaseCommit.Hash)
+				entry.Logger.Trace("creating target branch for merged/closed pull request", "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index, "branch", giteaPullRequest.Base.Ref, "sha", mergeBaseCommit.Hash)
 				if err = worktree.Checkout(&git.CheckoutOptions{
 					Create: true,
 					Force:  true,
@@ -727,7 +728,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 					continue
 				}
 
-				logger.Trace("creating source branch for merged/closed pull request", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index, "branch", giteaPullRequest.Head.Ref, "sha", prHeadHash)
+				entry.Logger.Trace("creating source branch for merged/closed pull request", "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index, "branch", giteaPullRequest.Head.Ref, "sha", prHeadHash)
 				if err = worktree.Checkout(&git.CheckoutOptions{
 					Create: h.Conditional(tmpEmptyCommitRequired, false, true),
 					Force:  true,
@@ -739,7 +740,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 					continue
 				}
 
-				logger.Debug("pushing branches for merged/closed pull request", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "github", fmt.Sprintf("%s/%s", githubPath[0], githubPath[1]), "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
+				entry.Logger.Debug("pushing branches for merged/closed pull request", "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
 				if err = gitRepo.PushContext(ctx, &git.PushOptions{
 					RemoteName: "github",
 					RefSpecs: []config.RefSpec{
@@ -749,7 +750,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 					Force: true,
 				}); err != nil {
 					if errors.Is(err, git.NoErrAlreadyUpToDate) {
-						logger.Trace("branch already exists and is up-to-date on GitHub", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "github", fmt.Sprintf("%s/%s", githubPath[0], githubPath[1]), "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
+						entry.Logger.Trace("branch already exists and is up-to-date on GitHub", "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
 					} else {
 						sendErr(fmt.Errorf("pushing temporary branches to github: %v", err))
 						failureCount++
@@ -763,7 +764,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 		}
 
 		if defaultBranch != giteaRepository.DefaultBranch && giteaPullRequest.Base.Ref == giteaRepository.DefaultBranch {
-			logger.Trace("changing target trunk branch", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index, "old_trunk", giteaRepository.DefaultBranch, "new_trunk", defaultBranch)
+			entry.Logger.Trace("changing target trunk branch", "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index, "old_trunk", giteaRepository.DefaultBranch, "new_trunk", defaultBranch)
 			giteaPullRequest.Base.Ref = defaultBranch
 		}
 
@@ -776,9 +777,9 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 			}
 		}
 
-		logger.Debug("determining pull request approvers", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index)
+		entry.Logger.Debug("determining pull request approvers", "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index)
 		approvers := make([]string, 0)
-		reviews, _, err := gi.ListPullReviews(giteaPath[0], giteaPath[1], giteaPullRequest.Index, gitea.ListPullReviewsOptions{})
+		reviews, _, err := gi.ListPullReviews(entry.GiteaOwner, entry.GiteaRepo, giteaPullRequest.Index, gitea.ListPullReviewsOptions{})
 		if err != nil {
 			sendErr(fmt.Errorf("listing pull request reviews: %v", err))
 		} else {
@@ -826,15 +827,15 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 
 ## Original Description
 
-%[3]s`, getGitHubAccountReference(giteaPullRequest.Poster), giteaPullRequest.Index, description, giteaPath[0], giteaPath[1], giteaPullRequest.Created.Format(dateFormat), closeDetails, approval, originalState, giteaDomain, giteaPullRequest.Title)
+%[3]s`, getGitHubAccountReference(giteaPullRequest.Poster), giteaPullRequest.Index, description, entry.GiteaOwner, entry.GiteaRepo, giteaPullRequest.Created.Format(dateFormat), closeDetails, approval, originalState, giteaDomain, giteaPullRequest.Title)
 
 		if len(body) > githubBodyLimit {
-			logger.Warn("pull request body was truncated due to platform limits", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "github", fmt.Sprintf("%s/%s", githubPath[0], githubPath[1]), "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
+			entry.Logger.Warn("pull request body was truncated due to platform limits", "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
 			body = h.SmartRenovateBodyTruncate(body, githubBodyLimit)
 		}
 
 		if githubPullRequest == nil {
-			logger.Info("creating pull request", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "github", fmt.Sprintf("%s/%s", githubPath[0], githubPath[1]), "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
+			entry.Logger.Info("creating pull request", "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
 			newPullRequest := github.NewPullRequest{
 				Title:               &giteaPullRequest.Title,
 				Head:                &giteaPullRequest.Head.Ref,
@@ -843,7 +844,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 				MaintainerCanModify: h.Pointer(true),
 				Draft:               &giteaPullRequest.Draft,
 			}
-			if githubPullRequest, _, err = gh.PullRequests.Create(ctx, githubPath[0], githubPath[1], &newPullRequest); err != nil {
+			if githubPullRequest, _, err = gh.PullRequests.Create(ctx, entry.GitHubOwner, entry.GitHubRepo, &newPullRequest); err != nil {
 				sendErr(fmt.Errorf("creating pull request: %v", err))
 				failureCount++
 				continue
@@ -851,7 +852,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 			time.Sleep(githubApiPauseBetweenMutativeRequests)
 
 			if tmpEmptyCommitRequired {
-				logger.Debug("reset empty commit list pull request branch to actual commit", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "github", fmt.Sprintf("%s/%s", githubPath[0], githubPath[1]), "pr_number", giteaPullRequest.Index, "source_branch", giteaPullRequest.Head.Ref, "actual_commit", prHeadRef)
+				entry.Logger.Debug("reset empty commit list pull request branch to actual commit", "pr_number", giteaPullRequest.Index, "source_branch", giteaPullRequest.Head.Ref, "actual_commit", prHeadRef)
 				if err = worktree.Checkout(&git.CheckoutOptions{
 					Create: false,
 					Force:  true,
@@ -868,7 +869,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 					continue
 				}
 
-				logger.Trace("pushing reset empty commit list pull request branch", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index)
+				entry.Logger.Trace("pushing reset empty commit list pull request branch", "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index)
 
 				if err = gitRepo.PushContext(ctx, &git.PushOptions{
 					RemoteName: "github",
@@ -878,7 +879,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 					Force: true,
 				}); err != nil {
 					if errors.Is(err, git.NoErrAlreadyUpToDate) {
-						logger.Trace("empty commit list branch already exists and is up-to-date on GitHub", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "github", fmt.Sprintf("%s/%s", githubPath[0], githubPath[1]), "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
+						entry.Logger.Trace("empty commit list branch already exists and is up-to-date on GitHub", "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
 					} else {
 						sendErr(fmt.Errorf("pushing reset temporary empty commit list branch to github: %v", err))
 						failureCount++
@@ -886,20 +887,20 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 					}
 				}
 				githubPullRequest.Head.SHA = h.Pointer(prHeadRef)
-				if githubPullRequest, _, err = gh.PullRequests.Edit(ctx, githubPath[0], githubPath[1], githubPullRequest.GetNumber(), githubPullRequest); err != nil {
+				if githubPullRequest, _, err = gh.PullRequests.Edit(ctx, entry.GitHubOwner, entry.GitHubRepo, githubPullRequest.GetNumber(), githubPullRequest); err != nil {
 					sendErr(fmt.Errorf("updating pull request: %v", err))
 					failureCount++
 					continue
 				}
 				time.Sleep(githubApiPauseBetweenMutativeRequests)
 
-				logger.Debug("creating empty commit list auto-close comment", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "github", fmt.Sprintf("%s/%s", githubPath[0], githubPath[1]), "pr_number", giteaPullRequest.Index)
+				entry.Logger.Debug("creating empty commit list auto-close comment", "pr_number", giteaPullRequest.Index)
 				newComment := github.IssueComment{
 					Body: h.Pointer(`> [!CAUTION]
 >
 > **Due to platform limitations in handling PRs with empty commit history or orphaned commits, this PR was flagged as "merged" or "closed". This does not necessarily represent its original state within Gitea.**`),
 				}
-				if _, _, err = gh.Issues.CreateComment(ctx, githubPath[0], githubPath[1], githubPullRequest.GetNumber(), &newComment); err != nil {
+				if _, _, err = gh.Issues.CreateComment(ctx, entry.GitHubOwner, entry.GitHubRepo, githubPullRequest.GetNumber(), &newComment); err != nil {
 					sendErr(fmt.Errorf("creating empty commit list auto-close comment: %v", err))
 					failureCount++
 				}
@@ -907,10 +908,10 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 			}
 
 			if giteaPullRequest.State == gitea.StateClosed {
-				logger.Debug("closing pull request", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "github", fmt.Sprintf("%s/%s", githubPath[0], githubPath[1]), "pr_number", githubPullRequest.GetNumber())
+				entry.Logger.Debug("closing pull request", "pr_number", githubPullRequest.GetNumber())
 
 				githubPullRequest.State = h.Pointer("closed")
-				if githubPullRequest, _, err = gh.PullRequests.Edit(ctx, githubPath[0], githubPath[1], githubPullRequest.GetNumber(), githubPullRequest); err != nil {
+				if githubPullRequest, _, err = gh.PullRequests.Edit(ctx, entry.GitHubOwner, entry.GitHubRepo, githubPullRequest.GetNumber(), githubPullRequest); err != nil {
 					sendErr(fmt.Errorf("updating pull request: %v", err))
 					failureCount++
 					continue
@@ -933,7 +934,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 					State:  newState,
 				}
 
-				if githubPullRequest, _, err = gh.PullRequests.Edit(ctx, githubPath[0], githubPath[1], pullRequestState.GetNumber(), pullRequestState); err != nil {
+				if githubPullRequest, _, err = gh.PullRequests.Edit(ctx, entry.GitHubOwner, entry.GitHubRepo, pullRequestState.GetNumber(), pullRequestState); err != nil {
 					sendErr(fmt.Errorf("updating pull request state: %v", err))
 					failureCount++
 					continue
@@ -945,25 +946,25 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 				(githubPullRequest.Title == nil || *githubPullRequest.Title != giteaPullRequest.Title) ||
 				(githubPullRequest.Body == nil || *githubPullRequest.Body != body) ||
 				(githubPullRequest.Draft == nil || *githubPullRequest.Draft != giteaPullRequest.Draft) {
-				logger.Info("updating pull request", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "github", fmt.Sprintf("%s/%s", githubPath[0], githubPath[1]), "pr_number", githubPullRequest.GetNumber())
+				entry.Logger.Info("updating pull request", "pr_number", githubPullRequest.GetNumber())
 
 				githubPullRequest.Title = &giteaPullRequest.Title
 				githubPullRequest.Body = &body
 				githubPullRequest.Draft = &giteaPullRequest.Draft
 				githubPullRequest.MaintainerCanModify = nil
-				if githubPullRequest, _, err = gh.PullRequests.Edit(ctx, githubPath[0], githubPath[1], githubPullRequest.GetNumber(), githubPullRequest); err != nil {
+				if githubPullRequest, _, err = gh.PullRequests.Edit(ctx, entry.GitHubOwner, entry.GitHubRepo, githubPullRequest.GetNumber(), githubPullRequest); err != nil {
 					sendErr(fmt.Errorf("updating pull request: %v", err))
 					failureCount++
 					continue
 				}
 				time.Sleep(githubApiPauseBetweenMutativeRequests)
 			} else {
-				logger.Trace("existing pull request is up-to-date", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "github", fmt.Sprintf("%s/%s", githubPath[0], githubPath[1]), "pr_number", githubPullRequest.GetNumber())
+				entry.Logger.Trace("existing pull request is up-to-date", "pr_number", githubPullRequest.GetNumber())
 			}
 		}
 
 		if cleanUpBranch {
-			logger.Debug("deleting temporary branches for closed pull request", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "github", fmt.Sprintf("%s/%s", githubPath[0], githubPath[1]), "pr_number", githubPullRequest.GetNumber(), "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
+			entry.Logger.Debug("deleting temporary branches for closed pull request", "pr_number", githubPullRequest.GetNumber(), "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
 			if err = gitRepo.PushContext(ctx, &git.PushOptions{
 				RemoteName: "github",
 				RefSpecs: []config.RefSpec{
@@ -973,7 +974,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 				Force: true,
 			}); err != nil {
 				if errors.Is(err, git.NoErrAlreadyUpToDate) {
-					logger.Trace("branches already deleted on GitHub", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "github", fmt.Sprintf("%s/%s", githubPath[0], githubPath[1]), "pr_number", githubPullRequest.GetNumber(), "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
+					entry.Logger.Trace("branches already deleted on GitHub", "pr_number", githubPullRequest.GetNumber(), "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
 				} else {
 					sendErr(fmt.Errorf("pushing branch deletions to github: %v", err))
 					failureCount++
@@ -982,7 +983,7 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 			}
 		}
 
-		err = migrateItemComments(ctx, githubPath, giteaPath, giteaRepository, giteaPullRequest.Index, githubPullRequest.GetNumber())
+		err = migrateItemComments(ctx, entry, giteaRepository, giteaPullRequest.Index, githubPullRequest.GetNumber())
 		if err != nil {
 			sendErr(err)
 			failureCount++
@@ -993,16 +994,16 @@ func migratePullRequests(ctx context.Context, githubPath, giteaPath []string, de
 
 	skippedCount := totalCount - successCount - failureCount
 
-	logger.Info("migrated pull requests from Gitea to GitHub", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "successful", successCount, "failed", failureCount, "skipped", skippedCount)
+	entry.Logger.Info("migrated pull requests from Gitea to GitHub", "successful", successCount, "failed", failureCount, "skipped", skippedCount)
 }
 
-func migrateItemComments(ctx context.Context, githubPath, giteaPath []string, giteaRepository *gitea.Repository, giteaItemId int64, githubItemId int) error {
+func migrateItemComments(ctx context.Context, entry *migration.Entry, giteaRepository *gitea.Repository, giteaItemId int64, githubItemId int) error {
 	var giteaComments []*gitea.Comment
 	opts := &gitea.ListIssueCommentOptions{}
 
-	logger.Debug("retrieving Gitea comments", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "repository_id", giteaRepository.ID, "item_id", giteaItemId)
+	entry.Logger.Debug("retrieving Gitea comments", "repository_id", giteaRepository.ID, "item_id", giteaItemId)
 	for {
-		result, resp, err := gi.ListIssueComments(giteaPath[0], giteaPath[1], giteaItemId, gitea.ListIssueCommentOptions{})
+		result, resp, err := gi.ListIssueComments(entry.GiteaOwner, entry.GiteaRepo, giteaItemId, gitea.ListIssueCommentOptions{})
 		if err != nil {
 			return fmt.Errorf("listing gitea comments: %v", err)
 		}
@@ -1016,7 +1017,7 @@ func migrateItemComments(ctx context.Context, githubPath, giteaPath []string, gi
 		opts.Page = resp.NextPage
 	}
 
-	logger.Info("migrating comments from Gitea to GitHub", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "github", fmt.Sprintf("%s/%s", githubPath[0], githubPath[1]), "item_id", githubItemId, "count", len(giteaComments))
+	entry.Logger.Info("migrating comments from Gitea to GitHub", "item_id", githubItemId, "count", len(giteaComments))
 
 	if len(giteaComments) == 0 {
 		// We don't need to request GitHub API if there are no comments to be migrated at all. Those secondary rate limit points can be safed.
@@ -1027,8 +1028,8 @@ func migrateItemComments(ctx context.Context, githubPath, giteaPath []string, gi
 		return fmt.Errorf("GitHub item id is 0 and would cause the API to retrieve all comments across the repository - leading to high rate limit burning")
 	}
 
-	logger.Debug("retrieving GitHub comments", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "github", fmt.Sprintf("%s/%s", githubPath[0], githubPath[1]), "item_id", githubItemId)
-	githubComments, _, err := gh.Issues.ListComments(ctx, githubPath[0], githubPath[1], githubItemId, &github.IssueListCommentsOptions{Sort: h.Pointer("created"), Direction: h.Pointer("asc")})
+	entry.Logger.Debug("retrieving GitHub comments", "item_id", githubItemId)
+	githubComments, _, err := gh.Issues.ListComments(ctx, entry.GitHubOwner, entry.GitHubRepo, githubItemId, &github.IssueListCommentsOptions{Sort: h.Pointer("created"), Direction: h.Pointer("asc")})
 	if err != nil {
 		return fmt.Errorf("listing github comments: %v", err)
 	}
@@ -1053,7 +1054,7 @@ func migrateItemComments(ctx context.Context, githubPath, giteaPath []string, gi
 
 %[4]s`, getGitHubAccountReference(comment.Poster), comment.ID, comment.Created.Format(dateFormat), comment.Body)
 		if len(commentBody) > githubBodyLimit {
-			logger.Warn("comment was truncated due to platform limits", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "github", fmt.Sprintf("%s/%s", githubPath[0], githubPath[1]), "gitea_item", giteaItemId, "github_item", githubItemId, "comment_id", comment.ID)
+			entry.Logger.Warn("comment was truncated due to platform limits", "gitea_item", giteaItemId, "github_item", githubItemId, "comment_id", comment.ID)
 			commentBody = strings.ReplaceAll(commentBody, "This comment was migrated from Gitea", "This comment was migrated from Gitea **and was truncated due to platform limits**")
 			commentBody = commentBody[:githubBodyLimit] + "..."
 		}
@@ -1068,25 +1069,25 @@ func migrateItemComments(ctx context.Context, githubPath, giteaPath []string, gi
 				foundExistingComment = true
 
 				if githubComment.Body == nil || *githubComment.Body != commentBody {
-					logger.Debug("updating comment", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "github", fmt.Sprintf("%s/%s", githubPath[0], githubPath[1]), "item_id", githubItemId, "comment_id", githubComment.GetID())
+					entry.Logger.Debug("updating comment", "item_id", githubItemId, "comment_id", githubComment.GetID())
 					githubComment.Body = &commentBody
-					if _, _, err = gh.Issues.EditComment(ctx, githubPath[0], githubPath[1], githubComment.GetID(), githubComment); err != nil {
+					if _, _, err = gh.Issues.EditComment(ctx, entry.GitHubOwner, entry.GitHubRepo, githubComment.GetID(), githubComment); err != nil {
 						// TODO: think about whether to allow "!foundExistingComment" branch to create a new comment on error; previously loop-break instead of return
 						return fmt.Errorf("updating comments: %v", err)
 					}
 					time.Sleep(githubApiPauseBetweenMutativeRequests)
 				}
 			} else {
-				logger.Trace("existing comment is up-to-date", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "github", fmt.Sprintf("%s/%s", githubPath[0], githubPath[1]), "item_id", githubItemId, "comment_id", githubComment.GetID())
+				entry.Logger.Trace("existing comment is up-to-date", "item_id", githubItemId, "comment_id", githubComment.GetID())
 			}
 		}
 
 		if !foundExistingComment {
-			logger.Debug("creating comment", "gitea", fmt.Sprintf("%s/%s", giteaPath[0], giteaPath[1]), "github", fmt.Sprintf("%s/%s", githubPath[0], githubPath[1]), "item_id", githubItemId)
+			entry.Logger.Debug("creating comment", "item_id", githubItemId)
 			newComment := github.IssueComment{
 				Body: &commentBody,
 			}
-			if _, _, err = gh.Issues.CreateComment(ctx, githubPath[0], githubPath[1], githubItemId, &newComment); err != nil {
+			if _, _, err = gh.Issues.CreateComment(ctx, entry.GitHubOwner, entry.GitHubRepo, githubItemId, &newComment); err != nil {
 				return fmt.Errorf("creating comment for gitea item #%d (#%d): %v", giteaItemId, githubItemId, err)
 			}
 			time.Sleep(githubApiPauseBetweenMutativeRequests)
