@@ -3,9 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"strings"
 
-	"code.gitea.io/sdk/gitea"
 	"github.com/google/go-github/v74/github"
 )
 
@@ -74,14 +72,4 @@ func getGithubUser(ctx context.Context, username string) (*github.User, error) {
 	}
 
 	return user, nil
-}
-
-// getGitHubAccountReference reads the Gitea account website property for any GitHub account references.
-// If found a GitHub account reference, that reference is used. Fallback is the original Gitea account name.
-func getGitHubAccountReference(giteaUser *gitea.User) string {
-	if giteaUser.Website != "" && strings.Index(giteaUser.Website, "https://github.com/") == 0 {
-		return "@" + strings.TrimPrefix(strings.ToLower(giteaUser.Website), "https://github.com/")
-	}
-
-	return giteaUser.UserName
 }

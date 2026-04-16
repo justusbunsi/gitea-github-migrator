@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 
+	"code.gitea.io/sdk/gitea"
 	"github.com/justusbunsi/gitea-github-migrator/internal/constants"
 )
 
@@ -49,4 +50,14 @@ func ParseProjectSlug(slug string) (owner, repo string, err error) {
 	}
 
 	return slug[:delimPosition], slug[delimPosition+1:], nil
+}
+
+// GetGitHubAccountReference reads the Gitea account website property for any GitHub account references.
+// If found a GitHub account reference, that reference is used. Fallback is the original Gitea account name.
+func GetGitHubAccountReference(giteaUser *gitea.User) string {
+	if giteaUser.Website != "" && strings.Index(giteaUser.Website, fmt.Sprintf("https://%s/", constants.DefaultGithubDomain)) == 0 {
+		return "@" + strings.TrimPrefix(strings.ToLower(giteaUser.Website), fmt.Sprintf("https://%s/", constants.DefaultGithubDomain))
+	}
+
+	return giteaUser.UserName
 }

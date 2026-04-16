@@ -233,7 +233,7 @@ func printReport(ctx context.Context, projects []Project) {
 }
 
 func reportProject(ctx context.Context, proj []string) (*Report, error) {
-	entry, err := migration.NewEntry(proj[0], proj[1], gi, logger)
+	entry, err := migration.NewEntry(proj[0], proj[1], gi, gh, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -309,7 +309,7 @@ func performMigration(ctx context.Context, projects []Project) error {
 }
 
 func migrateProject(ctx context.Context, proj []string) error {
-	entry, err := migration.NewEntry(proj[0], proj[1], gi, logger)
+	entry, err := migration.NewEntry(proj[0], proj[1], gi, gh, logger)
 	if err != nil {
 		return err
 	}
@@ -777,7 +777,7 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 		} else {
 			for _, review := range reviews {
 				if review.State == gitea.ReviewStateApproved {
-					approvers = append(approvers, getGitHubAccountReference(review.Reviewer))
+					approvers = append(approvers, h.GetGitHubAccountReference(review.Reviewer))
 				}
 			}
 		}
@@ -819,7 +819,7 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 
 ## Original Description
 
-%[3]s`, getGitHubAccountReference(giteaPullRequest.Poster), giteaPullRequest.Index, description, entry.GiteaOwner, entry.GiteaRepo, giteaPullRequest.Created.Format(constants.DateFormat), closeDetails, approval, originalState, giteaDomain, giteaPullRequest.Title)
+%[3]s`, h.GetGitHubAccountReference(giteaPullRequest.Poster), giteaPullRequest.Index, description, entry.GiteaOwner, entry.GiteaRepo, giteaPullRequest.Created.Format(constants.DateFormat), closeDetails, approval, originalState, giteaDomain, giteaPullRequest.Title)
 
 		if len(body) > constants.GithubBodyLimit {
 			entry.Logger.Warn("pull request body was truncated due to platform limits", "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
@@ -975,7 +975,7 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 			}
 		}
 
-		err = migrateItemComments(ctx, entry, giteaRepository, giteaPullRequest.Index, githubPullRequest.GetNumber())
+		err = entry.MigrateComments(ctx, giteaPullRequest.Index, githubPullRequest.GetNumber())
 		if err != nil {
 			sendErr(err)
 			failureCount++
@@ -987,104 +987,4 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 	skippedCount := totalCount - successCount - failureCount
 
 	entry.Logger.Info("migrated pull requests from Gitea to GitHub", "successful", successCount, "failed", failureCount, "skipped", skippedCount)
-}
-
-func migrateItemComments(ctx context.Context, entry *migration.Entry, giteaRepository *gitea.Repository, giteaItemId int64, githubItemId int) error {
-	var giteaComments []*gitea.Comment
-	opts := &gitea.ListIssueCommentOptions{}
-
-	entry.Logger.Debug("retrieving Gitea comments", "repository_id", giteaRepository.ID, "item_id", giteaItemId)
-	for {
-		result, resp, err := gi.ListIssueComments(entry.GiteaOwner, entry.GiteaRepo, giteaItemId, gitea.ListIssueCommentOptions{})
-		if err != nil {
-			return fmt.Errorf("listing gitea comments: %v", err)
-		}
-
-		giteaComments = append(giteaComments, result...)
-
-		if resp.NextPage == 0 {
-			break
-		}
-
-		opts.Page = resp.NextPage
-	}
-
-	entry.Logger.Info("migrating comments from Gitea to GitHub", "item_id", githubItemId, "count", len(giteaComments))
-
-	if len(giteaComments) == 0 {
-		// We don't need to request GitHub API if there are no comments to be migrated at all. Those secondary rate limit points can be safed.
-		return nil
-	}
-
-	if githubItemId == 0 {
-		return fmt.Errorf("GitHub item id is 0 and would cause the API to retrieve all comments across the repository - leading to high rate limit burning")
-	}
-
-	entry.Logger.Debug("retrieving GitHub comments", "item_id", githubItemId)
-	githubComments, _, err := gh.Issues.ListComments(ctx, entry.GitHubOwner, entry.GitHubRepo, githubItemId, &github.IssueListCommentsOptions{Sort: h.Pointer("created"), Direction: h.Pointer("asc")})
-	if err != nil {
-		return fmt.Errorf("listing github comments: %v", err)
-	}
-
-	for _, comment := range giteaComments {
-		if comment == nil {
-			continue
-		}
-
-		commentBody := fmt.Sprintf(`> [!NOTE]
-> This comment was migrated from Gitea
->
-> |      |      |
-> | ---- | ---- |
-> | **Original Author** | %[1]s |
-> | **Comment ID** | %[2]d |
-> | **Date Originally Created** | %[3]s |
-> |      |      |
->
-
-## Original Comment
-
-%[4]s`, getGitHubAccountReference(comment.Poster), comment.ID, comment.Created.Format(constants.DateFormat), comment.Body)
-		if len(commentBody) > constants.GithubBodyLimit {
-			entry.Logger.Warn("comment was truncated due to platform limits", "gitea_item", giteaItemId, "github_item", githubItemId, "comment_id", comment.ID)
-			commentBody = strings.ReplaceAll(commentBody, "This comment was migrated from Gitea", "This comment was migrated from Gitea **and was truncated due to platform limits**")
-			commentBody = commentBody[:constants.GithubBodyLimit] + "..."
-		}
-
-		foundExistingComment := false
-		for _, githubComment := range githubComments {
-			if githubComment == nil {
-				continue
-			}
-
-			if strings.Contains(githubComment.GetBody(), fmt.Sprintf("**Comment ID** | %d", comment.ID)) {
-				foundExistingComment = true
-
-				if githubComment.Body == nil || *githubComment.Body != commentBody {
-					entry.Logger.Debug("updating comment", "item_id", githubItemId, "comment_id", githubComment.GetID())
-					githubComment.Body = &commentBody
-					if _, _, err = gh.Issues.EditComment(ctx, entry.GitHubOwner, entry.GitHubRepo, githubComment.GetID(), githubComment); err != nil {
-						// TODO: think about whether to allow "!foundExistingComment" branch to create a new comment on error; previously loop-break instead of return
-						return fmt.Errorf("updating comments: %v", err)
-					}
-					time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
-				}
-			} else {
-				entry.Logger.Trace("existing comment is up-to-date", "item_id", githubItemId, "comment_id", githubComment.GetID())
-			}
-		}
-
-		if !foundExistingComment {
-			entry.Logger.Debug("creating comment", "item_id", githubItemId)
-			newComment := github.IssueComment{
-				Body: &commentBody,
-			}
-			if _, _, err = gh.Issues.CreateComment(ctx, entry.GitHubOwner, entry.GitHubRepo, githubItemId, &newComment); err != nil {
-				return fmt.Errorf("creating comment for gitea item #%d (#%d): %v", giteaItemId, githubItemId, err)
-			}
-			time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
-		}
-	}
-
-	return nil
 }
