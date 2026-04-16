@@ -16,7 +16,7 @@ func getGithubPullRequest(ctx context.Context, org, repo string, prNumber int) (
 	cacheToken := fmt.Sprintf("%s/%s/%d", org, repo, prNumber)
 	pullRequest := cache.getGithubPullRequest(cacheToken)
 	if pullRequest == nil {
-		logger.Debug("retrieving pull request details", "owner", org, "repo", repo, "pr_number", prNumber)
+		logger.Debug("retrieving pull request details", "github", fmt.Sprintf("%s/%s", org, repo), "pr_number", prNumber)
 		pullRequest, _, err = gh.PullRequests.Get(ctx, org, repo, prNumber)
 		if err != nil {
 			return nil, fmt.Errorf("retrieving pull request: %v", err)
@@ -26,7 +26,7 @@ func getGithubPullRequest(ctx context.Context, org, repo string, prNumber int) (
 			return nil, fmt.Errorf("nil pull request was returned: %d", prNumber)
 		}
 
-		logger.Trace("caching pull request details", "owner", org, "repo", repo, "pr_number", prNumber)
+		logger.Trace("caching pull request details", "github", fmt.Sprintf("%s/%s", org, repo), "pr_number", prNumber)
 		cache.setGithubPullRequest(cacheToken, *pullRequest)
 	}
 
@@ -106,9 +106,9 @@ func getAllGiteaPullRequests(ctx context.Context, owner, repo string, countMode 
 		opts.PageSize = 1
 		opts.Page = 1
 		logMessage = "retrieving Gitea pull request total count"
-		logger.Debug(logMessage, "owner", owner, "repo", repo)
+		logger.Debug(logMessage, "gitea_owner", owner, "gitea_repo", repo)
 	} else {
-		logger.Info(logMessage, "owner", owner, "repo", repo)
+		logger.Info(logMessage, "gitea_owner", owner, "gitea_repo", repo)
 	}
 	for {
 		// Check for context cancellation
