@@ -5,6 +5,7 @@ import (
 
 	"code.gitea.io/sdk/gitea"
 	"github.com/google/go-github/v74/github"
+	h "github.com/justusbunsi/gitea-github-migrator/internal/helpers"
 )
 
 const (
@@ -36,7 +37,7 @@ func (c objectCache) getGithubPullRequest(query string) *github.PullRequest {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	if v, ok := c.store[githubPullRequestCacheType][query]; ok {
-		return pointer(v.(github.PullRequest))
+		return h.Pointer(v.(github.PullRequest))
 	}
 	return nil
 }
@@ -51,7 +52,7 @@ func (c objectCache) getGithubSearchResults(query string) *github.IssuesSearchRe
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	if v, ok := c.store[githubSearchResultsCacheType][query]; ok {
-		return pointer(v.(github.IssuesSearchResult))
+		return h.Pointer(v.(github.IssuesSearchResult))
 	}
 	return nil
 }
@@ -66,7 +67,7 @@ func (c objectCache) getGithubUser(username string) *github.User {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	if v, ok := c.store[giteaUserCacheType][username]; ok {
-		return pointer(v.(github.User))
+		return h.Pointer(v.(github.User))
 	}
 	return nil
 }
@@ -81,7 +82,7 @@ func (c objectCache) getGiteaUser(username string) *gitea.User {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	if v, ok := c.store[githubUserCacheType][username]; ok {
-		return pointer(v.(gitea.User))
+		return h.Pointer(v.(gitea.User))
 	}
 	return nil
 }

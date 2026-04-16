@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
 
@@ -78,17 +77,6 @@ func getGithubUser(ctx context.Context, username string) (*github.User, error) {
 	return user, nil
 }
 
-func pointer[T any](v T) *T {
-	return &v
-}
-
-func conditional[T any](cond bool, truthyValue, falsyValue T) T {
-	if cond {
-		return truthyValue
-	}
-	return falsyValue
-}
-
 // getAllGiteaPullRequests has two modes: "actual retrieval" and "count".
 // In "actual retrieval" mode, it fetches all available PRs from Gitea.
 // In "count" mode it fetches the first page and returns only the "x-total-count" header.
@@ -153,29 +141,6 @@ func getGitHubAccountReference(giteaUser *gitea.User) string {
 	}
 
 	return giteaUser.UserName
-}
-
-// smartRenovateBodyTruncate considers too-long-to-handle Pull Requests as created by Renovate.
-// Those Pull Requests tend to exceed the limit by providing a very large "Release Notes" section.
-// To mitigate migration errors, we truncate those body contents similar to how Renovate handles the limit.
-// See https://github.com/renovatebot/renovate/blob/bd7214d04be0cc5ea7a4ddd8f6b214d5af19b707/lib/modules/platform/github/index.ts#L110 and https://github.com/renovatebot/renovate/blob/bd7214d04be0cc5ea7a4ddd8f6b214d5af19b707/lib/modules/platform/utils/pr-body.ts#L10.
-// In case the hard-coded Renovate regex does not match, the original input is being hard-limit truncated at the end.
-func smartRenovateBodyTruncate(str string) string {
-	r := regexp.MustCompile(`(?ms)(?P<preNotes>.*### Release Notes)(?P<releaseNotes>.*\n\n</details>\n\n---\n\n)(?P<postNotes>.*)`)
-	str = strings.ReplaceAll(str, "This pull request was migrated from Gitea", "This pull request was migrated from Gitea **and the description was truncated due to platform limits**")
-	matches := r.FindStringSubmatch(str)
-	if matches == nil {
-		return str[:githubBodyLimit] + "..."
-	}
-	divider := "\n\n</details>\n\n---\n\n"
-	preNotes := matches[r.SubexpIndex("preNotes")]
-	releaseNotes := matches[r.SubexpIndex("releaseNotes")]
-	postNotes := matches[r.SubexpIndex("postNotes")]
-	availableLength := githubBodyLimit - (len(preNotes) + len(postNotes) + len(divider))
-	if availableLength <= 0 {
-		return str[:githubBodyLimit] + "..."
-	}
-	return fmt.Sprintf("%s%s%s%s", preNotes, releaseNotes[:availableLength], divider, postNotes)
 }
 
 func parseProjectSlugs(proj []string) ([]string, []string, error) {
