@@ -4,21 +4,24 @@ import (
 	"fmt"
 
 	"code.gitea.io/sdk/gitea"
+	"github.com/go-git/go-git/v5"
 	"github.com/google/go-github/v74/github"
 	"github.com/hashicorp/go-hclog"
 	h "github.com/justusbunsi/gitea-github-migrator/internal/helpers"
 )
 
 type Entry struct {
-	GiteaOwner     string
-	GiteaRepo      string
-	GitHubOwner    string
-	GitHubRepo     string
-	Logger         hclog.Logger
-	PRSuccessCount int
-	PRFailureCount int
-	giteaClient    *gitea.Client
-	githubClient   *github.Client
+	GiteaOwner      string
+	GiteaRepo       string
+	GitHubOwner     string
+	GitHubRepo      string
+	Logger          hclog.Logger
+	PRSuccessCount  int
+	PRFailureCount  int
+	GiteaRepository *gitea.Repository
+	GitRepo         *git.Repository
+	giteaClient     *gitea.Client
+	githubClient    *github.Client
 }
 
 func NewEntry(giteaSlug, githubSlug string, giteaClient *gitea.Client, githubClient *github.Client, logger hclog.Logger) (*Entry, error) {
@@ -31,7 +34,7 @@ func NewEntry(giteaSlug, githubSlug string, giteaClient *gitea.Client, githubCli
 		return nil, fmt.Errorf("invalid github project: %w", err)
 	}
 
-	return &Entry{
+	e := &Entry{
 		GiteaOwner:   giteaOwner,
 		GiteaRepo:    giteaRepo,
 		GitHubOwner:  githubOwner,
@@ -39,5 +42,17 @@ func NewEntry(giteaSlug, githubSlug string, giteaClient *gitea.Client, githubCli
 		Logger:       logger.With("GITEA", giteaSlug, "GITHUB", githubSlug),
 		giteaClient:  giteaClient,
 		githubClient: githubClient,
-	}, nil
+	}
+
+	e.Logger.Info("searching for Gitea repository")
+	e.GiteaRepository, _, err = e.giteaClient.GetRepo(e.GiteaOwner, e.GiteaRepo)
+	if err != nil {
+		return nil, fmt.Errorf("retrieve gitea repository %s: %v", giteaSlug, err)
+	}
+
+	if e.GiteaRepository == nil {
+		return nil, fmt.Errorf("no matching Gitea repository found: %s", giteaSlug)
+	}
+
+	return e, nil
 }
