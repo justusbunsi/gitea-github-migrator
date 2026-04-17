@@ -504,7 +504,6 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 		return
 	}
 
-	var successCount, failureCount int
 	entry.Logger.Info("migrating pull requests from Gitea to GitHub", "count", totalCount)
 	for _, giteaPullRequest := range giteaPullRequests {
 		if giteaPullRequest == nil {
@@ -519,7 +518,7 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 
 		if giteaPullRequest.MergeBase == "" {
 			sendErr(fmt.Errorf("identifying suitable merge base for pull request %d", giteaPullRequest.Index))
-			failureCount++
+			entry.PRFailureCount++
 			continue
 		}
 
@@ -532,12 +531,12 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 		prHeadRefs, _, err := gi.GetRepoRefs(entry.GiteaOwner, entry.GiteaRepo, fmt.Sprintf("pull/%d/head", giteaPullRequest.Index))
 		if err != nil {
 			sendErr(fmt.Errorf("retrieve head ref for pull request %d: %v", giteaPullRequest.Index, err))
-			failureCount++
+			entry.PRFailureCount++
 			continue
 		}
 		if len(prHeadRefs) == 0 {
 			sendErr(fmt.Errorf("no head ref for pull request %d found", giteaPullRequest.Index))
-			failureCount++
+			entry.PRFailureCount++
 			continue
 		}
 		prHeadRef := prHeadRefs[0].Object.SHA
@@ -606,7 +605,7 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 		worktree, err := gitRepo.Worktree()
 		if err != nil {
 			sendErr(fmt.Errorf("creating worktree: %v", err))
-			failureCount++
+			entry.PRFailureCount++
 			continue
 		}
 
@@ -616,7 +615,7 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 			prHeadCommit, err := object.GetCommit(gitRepo.Storer, prHeadHash)
 			if err != nil {
 				sendErr(fmt.Errorf("loading pull request head commit: %v", err))
-				failureCount++
+				entry.PRFailureCount++
 				continue
 			}
 			entry.Logger.Trace("loading merge base", "pr_number", giteaPullRequest.Index, "pr_merge_base", giteaPullRequest.MergeBase)
@@ -624,14 +623,14 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 			mergeBaseCommit, err := object.GetCommit(gitRepo.Storer, mergeBaseHash)
 			if err != nil {
 				sendErr(fmt.Errorf("loading merge base: %v", err))
-				failureCount++
+				entry.PRFailureCount++
 				continue
 			}
 			entry.Logger.Trace("detecting best common ancestor", "pr_number", giteaPullRequest.Index, "base", mergeBaseHash, "head", prHeadHash)
 			bases, err := mergeBaseCommit.MergeBase(prHeadCommit)
 			if err != nil {
 				sendErr(fmt.Errorf("detecting best common ancestor: %v", err))
-				failureCount++
+				entry.PRFailureCount++
 				continue
 			}
 			if len(bases) == 0 {
@@ -647,7 +646,7 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 					Branch: plumbing.NewBranchReferenceName(h.Conditional(giteaPullRequest.State == gitea.StateClosed, sourceBranchForClosedPullRequest, giteaPullRequest.Head.Ref)),
 				}); err != nil {
 					sendErr(fmt.Errorf("checking out temporary empty commit list source branch for pull request #%d: %v", giteaPullRequest.Index, err))
-					failureCount++
+					entry.PRFailureCount++
 					continue
 				}
 
@@ -655,7 +654,7 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 				entry.Logger.Trace("reset worktree for migrator-required empty commit", "pr_number", giteaPullRequest.Index, "reset_to_sha", resetHash)
 				if err = worktree.Reset(&git.ResetOptions{Mode: git.HardReset, Commit: resetHash}); err != nil {
 					sendErr(fmt.Errorf("reset empty commit list pull request branch: %v", err))
-					failureCount++
+					entry.PRFailureCount++
 					continue
 				}
 
@@ -675,7 +674,7 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 				})
 				if err != nil {
 					sendErr(fmt.Errorf("creating empty migration commit: %v", err))
-					failureCount++
+					entry.PRFailureCount++
 					continue
 				}
 
@@ -693,7 +692,7 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 							entry.Logger.Trace("empty commit list branch already exists and is up-to-date on GitHub", "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
 						} else {
 							sendErr(fmt.Errorf("pushing temporary empty commit list branch to github: %v", err))
-							failureCount++
+							entry.PRFailureCount++
 							continue
 						}
 					}
@@ -716,7 +715,7 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 					Hash:   mergeBaseCommit.Hash,
 				}); err != nil {
 					sendErr(fmt.Errorf("checking out temporary target branch: %v", err))
-					failureCount++
+					entry.PRFailureCount++
 					continue
 				}
 
@@ -728,7 +727,7 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 					Hash:   h.Conditional(tmpEmptyCommitRequired, plumbing.ZeroHash, prHeadHash),
 				}); err != nil {
 					sendErr(fmt.Errorf("checking out temporary source branch: %v", err))
-					failureCount++
+					entry.PRFailureCount++
 					continue
 				}
 
@@ -745,7 +744,7 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 						entry.Logger.Trace("branch already exists and is up-to-date on GitHub", "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
 					} else {
 						sendErr(fmt.Errorf("pushing temporary branches to github: %v", err))
-						failureCount++
+						entry.PRFailureCount++
 						continue
 					}
 				}
@@ -838,7 +837,7 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 			}
 			if githubPullRequest, _, err = gh.PullRequests.Create(ctx, entry.GitHubOwner, entry.GitHubRepo, &newPullRequest); err != nil {
 				sendErr(fmt.Errorf("creating pull request: %v", err))
-				failureCount++
+				entry.PRFailureCount++
 				continue
 			}
 			time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
@@ -851,13 +850,13 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 					Branch: plumbing.NewBranchReferenceName(giteaPullRequest.Head.Ref),
 				}); err != nil {
 					sendErr(fmt.Errorf("checking out to-reset empty commit list branch: %v", err))
-					failureCount++
+					entry.PRFailureCount++
 					continue
 				}
 
 				if err = worktree.Reset(&git.ResetOptions{Mode: git.HardReset, Commit: plumbing.NewHash(prHeadRef)}); err != nil {
 					sendErr(fmt.Errorf("reset empty commit list pull request branch: %v", err))
-					failureCount++
+					entry.PRFailureCount++
 					continue
 				}
 
@@ -874,14 +873,14 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 						entry.Logger.Trace("empty commit list branch already exists and is up-to-date on GitHub", "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
 					} else {
 						sendErr(fmt.Errorf("pushing reset temporary empty commit list branch to github: %v", err))
-						failureCount++
+						entry.PRFailureCount++
 						continue
 					}
 				}
 				githubPullRequest.Head.SHA = h.Pointer(prHeadRef)
 				if githubPullRequest, _, err = gh.PullRequests.Edit(ctx, entry.GitHubOwner, entry.GitHubRepo, githubPullRequest.GetNumber(), githubPullRequest); err != nil {
 					sendErr(fmt.Errorf("updating pull request: %v", err))
-					failureCount++
+					entry.PRFailureCount++
 					continue
 				}
 				time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
@@ -894,7 +893,7 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 				}
 				if _, _, err = gh.Issues.CreateComment(ctx, entry.GitHubOwner, entry.GitHubRepo, githubPullRequest.GetNumber(), &newComment); err != nil {
 					sendErr(fmt.Errorf("creating empty commit list auto-close comment: %v", err))
-					failureCount++
+					entry.PRFailureCount++
 				}
 				time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
 			}
@@ -905,7 +904,7 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 				githubPullRequest.State = h.Pointer("closed")
 				if githubPullRequest, _, err = gh.PullRequests.Edit(ctx, entry.GitHubOwner, entry.GitHubRepo, githubPullRequest.GetNumber(), githubPullRequest); err != nil {
 					sendErr(fmt.Errorf("updating pull request: %v", err))
-					failureCount++
+					entry.PRFailureCount++
 					continue
 				}
 				time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
@@ -928,7 +927,7 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 
 				if githubPullRequest, _, err = gh.PullRequests.Edit(ctx, entry.GitHubOwner, entry.GitHubRepo, pullRequestState.GetNumber(), pullRequestState); err != nil {
 					sendErr(fmt.Errorf("updating pull request state: %v", err))
-					failureCount++
+					entry.PRFailureCount++
 					continue
 				}
 				time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
@@ -946,7 +945,7 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 				githubPullRequest.MaintainerCanModify = nil
 				if githubPullRequest, _, err = gh.PullRequests.Edit(ctx, entry.GitHubOwner, entry.GitHubRepo, githubPullRequest.GetNumber(), githubPullRequest); err != nil {
 					sendErr(fmt.Errorf("updating pull request: %v", err))
-					failureCount++
+					entry.PRFailureCount++
 					continue
 				}
 				time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
@@ -969,7 +968,7 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 					entry.Logger.Trace("branches already deleted on GitHub", "pr_number", githubPullRequest.GetNumber(), "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
 				} else {
 					sendErr(fmt.Errorf("pushing branch deletions to github: %v", err))
-					failureCount++
+					entry.PRFailureCount++
 					continue
 				}
 			}
@@ -978,13 +977,13 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 		err = entry.MigrateComments(ctx, giteaPullRequest.Index, githubPullRequest.GetNumber())
 		if err != nil {
 			sendErr(err)
-			failureCount++
+			entry.PRFailureCount++
 		} else {
-			successCount++
+			entry.PRSuccessCount++
 		}
 	}
 
-	skippedCount := totalCount - successCount - failureCount
+	skippedCount := totalCount - entry.PRSuccessCount - entry.PRFailureCount
 
-	entry.Logger.Info("migrated pull requests from Gitea to GitHub", "successful", successCount, "failed", failureCount, "skipped", skippedCount)
+	entry.Logger.Info("migrated pull requests from Gitea to GitHub", "successful", entry.PRSuccessCount, "failed", entry.PRFailureCount, "skipped", skippedCount)
 }

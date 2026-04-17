@@ -10,13 +10,15 @@ import (
 )
 
 type Entry struct {
-	GiteaOwner   string
-	GiteaRepo    string
-	GitHubOwner  string
-	GitHubRepo   string
-	Logger       hclog.Logger
-	giteaClient  *gitea.Client
-	githubClient *github.Client
+	GiteaOwner     string
+	GiteaRepo      string
+	GitHubOwner    string
+	GitHubRepo     string
+	Logger         hclog.Logger
+	PRSuccessCount int
+	PRFailureCount int
+	giteaClient    *gitea.Client
+	githubClient   *github.Client
 }
 
 func NewEntry(giteaSlug, githubSlug string, giteaClient *gitea.Client, githubClient *github.Client, logger hclog.Logger) (*Entry, error) {
