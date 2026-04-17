@@ -243,12 +243,12 @@ func reportProject(ctx context.Context, proj []string) (*Report, error) {
 		return nil, err
 	}
 
-	_, issueCount, err := entry.GetAllGiteaIssues(ctx, true)
+	_, issueCount, err := entry.GetAllGiteaIssues(ctx, gitea.IssueTypeIssue, true)
 	if err != nil {
 		return nil, err
 	}
 
-	_, prCount, err := entry.GetAllGiteaPullRequests(ctx, true)
+	_, prCount, err := entry.GetAllGiteaIssues(ctx, gitea.IssueTypePull, true)
 	if err != nil {
 		return nil, err
 	}
@@ -491,53 +491,122 @@ func migrateProject(ctx context.Context, proj []string) error {
 		return fmt.Errorf("setting default branch: %v", err)
 	}
 
-	if enableIssues {
-		giteaIssues, totalCount, err := entry.GetAllGiteaIssues(ctx, false)
+	if enableIssues && enablePullRequests {
+		giteaItems, totalCount, err := entry.GetAllGiteaIssues(ctx, gitea.IssueTypeAll, false)
 		if err != nil {
 			return err
 		}
 
-		entry.Logger.Info("migrating issues from Gitea to GitHub", "count", totalCount)
-		for _, giteaIssue := range giteaIssues {
-			if giteaIssue == nil {
-				continue
-			}
-
-			if err := ctx.Err(); err != nil {
-				sendErr(fmt.Errorf("preparing to migrate issue: %v", err))
-				break
-			}
-
-			migrateIssue(ctx, entry, createRepo, giteaIssue)
-		}
-
-		skippedCount := totalCount - entry.IssueSuccessCount - entry.IssueFailureCount
-		entry.Logger.Info("migrated issues from Gitea to GitHub", "successful", entry.IssueSuccessCount, "failed", entry.IssueFailureCount, "skipped", skippedCount)
-	}
-
-	if enablePullRequests {
-		giteaPullRequests, totalCount, err := entry.GetAllGiteaPullRequests(ctx, false)
+		giteaPullRequests, prTotalCount, err := entry.GetAllGiteaPullRequests(ctx, false)
 		if err != nil {
 			return err
 		}
 
-		entry.Logger.Info("migrating pull requests from Gitea to GitHub", "count", totalCount)
-		for _, giteaPullRequest := range giteaPullRequests {
-			if giteaPullRequest == nil {
+		// To preserve item IDs and their orders while migrating them, we need to detect ID gaps in the list.
+		// Those items were initially deleted and allocated an ID, so we inject a phantom issue with the missing ID to prevent mismatches.
+		phantomItemsCount := 0
+		filled := make([]*gitea.Issue, 0, len(giteaItems))
+		nextExpected := int64(1)
+		for _, issue := range giteaItems {
+			for ; nextExpected < issue.Index; nextExpected++ {
+				logger.Warn("add phantom", "index", nextExpected)
+				filled = append(filled, &gitea.Issue{
+					ID:    0,
+					Index: nextExpected,
+					Poster: &gitea.User{
+						UserName: constants.PhantomItemPoster,
+					},
+					Title: constants.PhantomItemTitle,
+					Body:  constants.PhantomItemBody,
+				})
+				phantomItemsCount++
+			}
+			filled = append(filled, issue)
+			nextExpected = issue.Index + 1
+		}
+		giteaItems = filled
+
+		entry.Logger.Info("migrating issues and pull requests from Gitea to GitHub", "issues", totalCount-prTotalCount, "pull_requests", prTotalCount, "phantom_items", phantomItemsCount)
+
+		for _, giteaItem := range giteaItems {
+			if giteaItem == nil {
 				continue
 			}
 
 			// Check for context cancellation
 			if err := ctx.Err(); err != nil {
-				sendErr(fmt.Errorf("preparing to list pull requests: %v", err))
+				sendErr(fmt.Errorf("preparing to migrate item: %v", err))
 				break
 			}
 
-			migratePullRequest(ctx, entry, defaultBranch, createRepo, giteaPullRequest)
+			if giteaItem.PullRequest != nil {
+				idx := slices.IndexFunc(giteaPullRequests, func(pr *gitea.PullRequest) bool {
+					return pr.Index == giteaItem.Index
+				})
+				if idx == -1 {
+					sendErr(fmt.Errorf("pull request #%d not found in dataset", giteaItem.Index))
+					entry.PRFailureCount++
+					continue
+				}
+				migratePullRequest(ctx, entry, defaultBranch, createRepo, giteaPullRequests[idx])
+			} else {
+				migrateIssue(ctx, entry, createRepo, giteaItem)
+			}
 		}
 
-		skippedCount := totalCount - entry.PRSuccessCount - entry.PRFailureCount
-		entry.Logger.Info("migrated pull requests from Gitea to GitHub", "successful", entry.PRSuccessCount, "failed", entry.PRFailureCount, "skipped", skippedCount)
+		issueSkipped := totalCount + phantomItemsCount - prTotalCount - entry.IssueSuccessCount - entry.IssueFailureCount
+		prSkipped := prTotalCount - entry.PRSuccessCount - entry.PRFailureCount
+		entry.Logger.Info("migrated issues from Gitea to GitHub", "successful", entry.IssueSuccessCount, "failed", entry.IssueFailureCount, "skipped", issueSkipped)
+		entry.Logger.Info("migrated pull requests from Gitea to GitHub", "successful", entry.PRSuccessCount, "failed", entry.PRFailureCount, "skipped", prSkipped)
+	} else {
+		if enableIssues {
+			giteaIssues, totalCount, err := entry.GetAllGiteaIssues(ctx, gitea.IssueTypeIssue, false)
+			if err != nil {
+				return err
+			}
+
+			entry.Logger.Info("migrating issues from Gitea to GitHub", "count", totalCount)
+			for _, giteaIssue := range giteaIssues {
+				if giteaIssue == nil {
+					continue
+				}
+
+				if err := ctx.Err(); err != nil {
+					sendErr(fmt.Errorf("preparing to migrate issue: %v", err))
+					break
+				}
+
+				migrateIssue(ctx, entry, createRepo, giteaIssue)
+			}
+
+			skippedCount := totalCount - entry.IssueSuccessCount - entry.IssueFailureCount
+			entry.Logger.Info("migrated issues from Gitea to GitHub", "successful", entry.IssueSuccessCount, "failed", entry.IssueFailureCount, "skipped", skippedCount)
+		}
+
+		if enablePullRequests {
+			giteaPullRequests, totalCount, err := entry.GetAllGiteaPullRequests(ctx, false)
+			if err != nil {
+				return err
+			}
+
+			entry.Logger.Info("migrating pull requests from Gitea to GitHub", "count", totalCount)
+			for _, giteaPullRequest := range giteaPullRequests {
+				if giteaPullRequest == nil {
+					continue
+				}
+
+				// Check for context cancellation
+				if err := ctx.Err(); err != nil {
+					sendErr(fmt.Errorf("preparing to list pull requests: %v", err))
+					break
+				}
+
+				migratePullRequest(ctx, entry, defaultBranch, createRepo, giteaPullRequest)
+			}
+
+			skippedCount := totalCount - entry.PRSuccessCount - entry.PRFailureCount
+			entry.Logger.Info("migrated pull requests from Gitea to GitHub", "successful", entry.PRSuccessCount, "failed", entry.PRFailureCount, "skipped", skippedCount)
+		}
 	}
 
 	return nil
@@ -1145,6 +1214,12 @@ func migrateIssue(ctx context.Context, entry *migration.Entry, initialMigration 
 		} else {
 			entry.Logger.Trace("existing issue is up-to-date", "issue_number", githubIssue.GetNumber())
 		}
+	}
+
+	if giteaIssue.Poster.UserName == constants.PhantomItemPoster && giteaIssue.Title == constants.PhantomItemTitle && giteaIssue.Body == constants.PhantomItemBody {
+		// phantom items don't exist and therefore have no comments - early exit
+		entry.IssueSuccessCount++
+		return
 	}
 
 	err := entry.MigrateComments(ctx, giteaIssue.Index, githubIssue.GetNumber())

@@ -81,6 +81,8 @@ To enable migration of Gitea pull requests to GitHub pull requests (including cl
 
 To enable migration of Gitea issues to GitHub issues (including closed ones!), specify `-migrate-issues`.
 
+Note: If `-migrate-pull-requests` and `-migrate-issues` are both enabled, the issue/pull ID order will be preserved on GitHub. On errors creating issues/pulls, the tool stops migrating that repository to prevent ID mismatches. In case of deleted issues/pulls in Gitea, a phantom issue is created to allocate the ID.
+
 To delete existing GitHub repos prior to migrating, pass the `-delete-existing-repos` argument. _This is potentially dangerous, you won't be asked for confirmation._
 
 Note: If the destination repository does not exist, this tool will attempt to create a private repository. If the destination repo already exists, it will be used unless you specify `-delete-existing-repos`

@@ -10,9 +10,9 @@ import (
 )
 
 // GetAllGiteaIssues has two modes: "actual retrieval" and "count".
-// In "actual retrieval" mode, it fetches all available issues from Gitea (excluding pull requests).
+// In "actual retrieval" mode, it fetches all available items of the given type from Gitea.
 // In "count" mode it fetches the first page and returns only the "x-total-count" header.
-func (e *Entry) GetAllGiteaIssues(ctx context.Context, countMode bool) ([]*gitea.Issue, int, error) {
+func (e *Entry) GetAllGiteaIssues(ctx context.Context, issueType gitea.IssueType, countMode bool) ([]*gitea.Issue, int, error) {
 	var issues []*gitea.Issue
 	var totalCount *int
 
@@ -20,16 +20,17 @@ func (e *Entry) GetAllGiteaIssues(ctx context.Context, countMode bool) ([]*gitea
 
 	opts := gitea.ListIssueOption{
 		State: gitea.StateAll,
-		Type:  gitea.IssueTypeIssue,
+		Type:  issueType,
 	}
 	if countMode {
 		opts.PageSize = 1
 		opts.Page = 1
 		logMessage = "retrieving Gitea issue total count"
-		e.Logger.Debug(logMessage)
-	} else {
-		e.Logger.Info(logMessage)
+	} else if issueType == gitea.IssueTypeAll {
+		logMessage = "retrieving Gitea issues and pull requests"
 	}
+	e.Logger.Info(logMessage)
+
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, 0, fmt.Errorf("%s: %v", logMessage, err)
@@ -61,9 +62,9 @@ func (e *Entry) GetAllGiteaIssues(ctx context.Context, countMode bool) ([]*gitea
 		opts.Page = resp.NextPage
 	}
 
-	// Gitea issue listing API does not support sorting, so we sort ourselves descending (aka oldest first).
+	// Gitea issue listing API does not support sorting, so we sort ourselves by index ascending (oldest first).
 	sort.Slice(issues, func(i, j int) bool {
-		return issues[i].Created.Before(issues[j].Created)
+		return issues[i].Index < issues[j].Index
 	})
 
 	return issues, *totalCount, nil
