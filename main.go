@@ -520,6 +520,7 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 		if giteaPullRequest.MergeBase == "" {
 			sendErr(fmt.Errorf("identifying suitable merge base for pull request %d", giteaPullRequest.Index))
 			failureCount++
+			continue
 		}
 
 		sourceBranchForClosedPullRequest := fmt.Sprintf("migration-source-%d/%s", giteaPullRequest.Index, giteaPullRequest.Head.Ref)
@@ -589,8 +590,7 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 							break
 						}
 
-						if strings.Contains(ghPr.GetBody(), fmt.Sprintf("**Gitea PR Number** | %d", giteaPullRequest.Index)) ||
-							strings.Contains(ghPr.GetBody(), fmt.Sprintf("**Gitea PR Number** | [%d]", giteaPullRequest.Index)) {
+						if strings.Contains(ghPr.GetBody(), fmt.Sprintf("**Gitea PR Number** | [%d]", giteaPullRequest.Index)) {
 							entry.Logger.Debug("found existing pull request", "pr_number", ghPr.GetNumber())
 							githubPullRequest = ghPr
 							break
