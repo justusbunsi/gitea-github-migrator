@@ -491,317 +491,320 @@ func migrateProject(ctx context.Context, proj []string) error {
 	}
 
 	if enablePullRequests {
-		migratePullRequests(ctx, entry, defaultBranch, giteaRepository, gitRepo, createRepo)
+		giteaPullRequests, totalCount, err := entry.GetAllGiteaPullRequests(ctx, false)
+		if err != nil {
+			return err
+		}
+
+		entry.Logger.Info("migrating pull requests from Gitea to GitHub", "count", totalCount)
+		for _, giteaPullRequest := range giteaPullRequests {
+			if giteaPullRequest == nil {
+				continue
+			}
+
+			// Check for context cancellation
+			if err := ctx.Err(); err != nil {
+				sendErr(fmt.Errorf("preparing to list pull requests: %v", err))
+				break
+			}
+
+			migratePullRequest(ctx, entry, defaultBranch, giteaRepository, gitRepo, createRepo, giteaPullRequest)
+		}
+
+		skippedCount := totalCount - entry.PRSuccessCount - entry.PRFailureCount
+		entry.Logger.Info("migrated pull requests from Gitea to GitHub", "successful", entry.PRSuccessCount, "failed", entry.PRFailureCount, "skipped", skippedCount)
 	}
 
 	return nil
 }
 
-func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBranch string, giteaRepository *gitea.Repository, gitRepo *git.Repository, initialMigration bool) {
-	giteaPullRequests, totalCount, err := entry.GetAllGiteaPullRequests(ctx, false)
-	if err != nil {
-		sendErr(err)
+func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBranch string, giteaRepository *gitea.Repository, gitRepo *git.Repository, initialMigration bool, giteaPullRequest *gitea.PullRequest) {
+	if giteaPullRequest.MergeBase == "" {
+		sendErr(fmt.Errorf("identifying suitable merge base for pull request %d", giteaPullRequest.Index))
+		entry.PRFailureCount++
 		return
 	}
 
-	entry.Logger.Info("migrating pull requests from Gitea to GitHub", "count", totalCount)
-	for _, giteaPullRequest := range giteaPullRequests {
-		if giteaPullRequest == nil {
-			continue
-		}
+	sourceBranchForClosedPullRequest := fmt.Sprintf("migration-source-%d/%s", giteaPullRequest.Index, giteaPullRequest.Head.Ref)
+	targetBranchForClosedPullRequest := fmt.Sprintf("migration-target-%d/%s", giteaPullRequest.Index, giteaPullRequest.Base.Ref)
 
-		// Check for context cancellation
-		if err := ctx.Err(); err != nil {
-			sendErr(fmt.Errorf("preparing to list pull requests: %v", err))
-			break
-		}
+	var cleanUpBranch, tmpEmptyCommitRequired bool
+	var githubPullRequest *github.PullRequest
+	entry.Logger.Trace("retrieve pull request head ref", "pr_number", giteaPullRequest.Index)
+	prHeadRefs, _, err := gi.GetRepoRefs(entry.GiteaOwner, entry.GiteaRepo, fmt.Sprintf("pull/%d/head", giteaPullRequest.Index))
+	if err != nil {
+		sendErr(fmt.Errorf("retrieve head ref for pull request %d: %v", giteaPullRequest.Index, err))
+		entry.PRFailureCount++
+		return
+	}
+	if len(prHeadRefs) == 0 {
+		sendErr(fmt.Errorf("no head ref for pull request %d found", giteaPullRequest.Index))
+		entry.PRFailureCount++
+		return
+	}
+	prHeadRef := prHeadRefs[0].Object.SHA
 
-		if giteaPullRequest.MergeBase == "" {
-			sendErr(fmt.Errorf("identifying suitable merge base for pull request %d", giteaPullRequest.Index))
-			entry.PRFailureCount++
-			continue
-		}
+	// Some pull requests have no commits, flag these for later handling
+	if strings.EqualFold(giteaPullRequest.MergeBase, prHeadRef) {
+		entry.Logger.Debug("pull request with empty commit list", "pr_number", giteaPullRequest.Index)
+		tmpEmptyCommitRequired = true
+	}
 
-		sourceBranchForClosedPullRequest := fmt.Sprintf("migration-source-%d/%s", giteaPullRequest.Index, giteaPullRequest.Head.Ref)
-		targetBranchForClosedPullRequest := fmt.Sprintf("migration-target-%d/%s", giteaPullRequest.Index, giteaPullRequest.Base.Ref)
-
-		var cleanUpBranch, tmpEmptyCommitRequired bool
-		var githubPullRequest *github.PullRequest
-		entry.Logger.Trace("retrieve pull request head ref", "pr_number", giteaPullRequest.Index)
-		prHeadRefs, _, err := gi.GetRepoRefs(entry.GiteaOwner, entry.GiteaRepo, fmt.Sprintf("pull/%d/head", giteaPullRequest.Index))
+	if !initialMigration {
+		entry.Logger.Debug("searching for any existing pull request", "pr_number", giteaPullRequest.Index)
+		sourceBranches := []string{giteaPullRequest.Head.Ref, sourceBranchForClosedPullRequest}
+		branchQuery := fmt.Sprintf("head:%s", strings.Join(sourceBranches, " OR head:"))
+		query := fmt.Sprintf("repo:%s/%s AND is:pr AND (%s)", entry.GitHubOwner, entry.GitHubRepo, branchQuery)
+		searchResult, err := getGithubSearchResults(ctx, query)
 		if err != nil {
-			sendErr(fmt.Errorf("retrieve head ref for pull request %d: %v", giteaPullRequest.Index, err))
-			entry.PRFailureCount++
-			continue
-		}
-		if len(prHeadRefs) == 0 {
-			sendErr(fmt.Errorf("no head ref for pull request %d found", giteaPullRequest.Index))
-			entry.PRFailureCount++
-			continue
-		}
-		prHeadRef := prHeadRefs[0].Object.SHA
-
-		// Some pull requests have no commits, flag these for later handling
-		if strings.EqualFold(giteaPullRequest.MergeBase, prHeadRef) {
-			entry.Logger.Debug("pull request with empty commit list", "pr_number", giteaPullRequest.Index)
-			tmpEmptyCommitRequired = true
+			sendErr(fmt.Errorf("listing pull requests: %v", err))
+			return
 		}
 
-		if !initialMigration {
-			entry.Logger.Debug("searching for any existing pull request", "pr_number", giteaPullRequest.Index)
-			sourceBranches := []string{giteaPullRequest.Head.Ref, sourceBranchForClosedPullRequest}
-			branchQuery := fmt.Sprintf("head:%s", strings.Join(sourceBranches, " OR head:"))
-			query := fmt.Sprintf("repo:%s/%s AND is:pr AND (%s)", entry.GitHubOwner, entry.GitHubRepo, branchQuery)
-			searchResult, err := getGithubSearchResults(ctx, query)
-			if err != nil {
-				sendErr(fmt.Errorf("listing pull requests: %v", err))
+		// Look for an existing GitHub pull request
+		skip := false
+		for _, issue := range searchResult.Issues {
+			if issue == nil {
 				continue
 			}
 
-			// Look for an existing GitHub pull request
-			skip := false
-			for _, issue := range searchResult.Issues {
-				if issue == nil {
-					continue
-				}
+			// Check for context cancellation
+			if err := ctx.Err(); err != nil {
+				sendErr(fmt.Errorf("preparing to retrieve pull request: %v", err))
+				break
+			}
 
-				// Check for context cancellation
-				if err := ctx.Err(); err != nil {
-					sendErr(fmt.Errorf("preparing to retrieve pull request: %v", err))
+			if issue.IsPullRequest() {
+				// Extract the PR number from the URL
+				prUrl, err := url.Parse(*issue.PullRequestLinks.URL)
+				if err != nil {
+					sendErr(fmt.Errorf("parsing pull request url: %v", err))
+					skip = true
 					break
 				}
 
-				if issue.IsPullRequest() {
-					// Extract the PR number from the URL
-					prUrl, err := url.Parse(*issue.PullRequestLinks.URL)
+				if m := regexp.MustCompile(".+/([0-9]+)$").FindStringSubmatch(prUrl.Path); len(m) == 2 {
+					prNumber, _ := strconv.Atoi(m[1])
+					ghPr, err := getGithubPullRequest(ctx, entry.GitHubOwner, entry.GitHubRepo, prNumber)
 					if err != nil {
-						sendErr(fmt.Errorf("parsing pull request url: %v", err))
+						sendErr(fmt.Errorf("retrieving pull request: %v", err))
 						skip = true
 						break
 					}
 
-					if m := regexp.MustCompile(".+/([0-9]+)$").FindStringSubmatch(prUrl.Path); len(m) == 2 {
-						prNumber, _ := strconv.Atoi(m[1])
-						ghPr, err := getGithubPullRequest(ctx, entry.GitHubOwner, entry.GitHubRepo, prNumber)
-						if err != nil {
-							sendErr(fmt.Errorf("retrieving pull request: %v", err))
-							skip = true
-							break
-						}
-
-						if strings.Contains(ghPr.GetBody(), fmt.Sprintf("**Gitea PR Number** | [%d]", giteaPullRequest.Index)) {
-							entry.Logger.Debug("found existing pull request", "pr_number", ghPr.GetNumber())
-							githubPullRequest = ghPr
-							break
-						}
+					if strings.Contains(ghPr.GetBody(), fmt.Sprintf("**Gitea PR Number** | [%d]", giteaPullRequest.Index)) {
+						entry.Logger.Debug("found existing pull request", "pr_number", ghPr.GetNumber())
+						githubPullRequest = ghPr
+						break
 					}
 				}
 			}
-			if skip {
-				continue
-			}
 		}
+		if skip {
+			return
+		}
+	}
 
-		worktree, err := gitRepo.Worktree()
+	worktree, err := gitRepo.Worktree()
+	if err != nil {
+		sendErr(fmt.Errorf("creating worktree: %v", err))
+		entry.PRFailureCount++
+		return
+	}
+
+	if githubPullRequest == nil {
+		entry.Logger.Trace("loading pull request head commit", "pr_number", giteaPullRequest.Index, "head_sha", prHeadRef)
+		prHeadHash := plumbing.NewHash(prHeadRef)
+		prHeadCommit, err := object.GetCommit(gitRepo.Storer, prHeadHash)
 		if err != nil {
-			sendErr(fmt.Errorf("creating worktree: %v", err))
+			sendErr(fmt.Errorf("loading pull request head commit: %v", err))
 			entry.PRFailureCount++
-			continue
+			return
+		}
+		entry.Logger.Trace("loading merge base", "pr_number", giteaPullRequest.Index, "pr_merge_base", giteaPullRequest.MergeBase)
+		mergeBaseHash := plumbing.NewHash(giteaPullRequest.MergeBase)
+		mergeBaseCommit, err := object.GetCommit(gitRepo.Storer, mergeBaseHash)
+		if err != nil {
+			sendErr(fmt.Errorf("loading merge base: %v", err))
+			entry.PRFailureCount++
+			return
+		}
+		entry.Logger.Trace("detecting best common ancestor", "pr_number", giteaPullRequest.Index, "base", mergeBaseHash, "head", prHeadHash)
+		bases, err := mergeBaseCommit.MergeBase(prHeadCommit)
+		if err != nil {
+			sendErr(fmt.Errorf("detecting best common ancestor: %v", err))
+			entry.PRFailureCount++
+			return
+		}
+		if len(bases) == 0 {
+			entry.Logger.Trace("orphaned head commit detected", "pr_number", giteaPullRequest.Index, "sha", prHeadHash)
+			tmpEmptyCommitRequired = true
 		}
 
-		if githubPullRequest == nil {
-			entry.Logger.Trace("loading pull request head commit", "pr_number", giteaPullRequest.Index, "head_sha", prHeadRef)
-			prHeadHash := plumbing.NewHash(prHeadRef)
-			prHeadCommit, err := object.GetCommit(gitRepo.Storer, prHeadHash)
-			if err != nil {
-				sendErr(fmt.Errorf("loading pull request head commit: %v", err))
+		if tmpEmptyCommitRequired {
+			entry.Logger.Trace("checkout source branch for empty commit list pull request", "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index)
+			if err = worktree.Checkout(&git.CheckoutOptions{
+				Create: h.Conditional(giteaPullRequest.State == gitea.StateOpen, false, true),
+				Force:  true,
+				Branch: plumbing.NewBranchReferenceName(h.Conditional(giteaPullRequest.State == gitea.StateClosed, sourceBranchForClosedPullRequest, giteaPullRequest.Head.Ref)),
+			}); err != nil {
+				sendErr(fmt.Errorf("checking out temporary empty commit list source branch for pull request #%d: %v", giteaPullRequest.Index, err))
 				entry.PRFailureCount++
-				continue
+				return
 			}
-			entry.Logger.Trace("loading merge base", "pr_number", giteaPullRequest.Index, "pr_merge_base", giteaPullRequest.MergeBase)
-			mergeBaseHash := plumbing.NewHash(giteaPullRequest.MergeBase)
-			mergeBaseCommit, err := object.GetCommit(gitRepo.Storer, mergeBaseHash)
-			if err != nil {
-				sendErr(fmt.Errorf("loading merge base: %v", err))
+
+			resetHash := h.Conditional(len(bases) == 0, mergeBaseHash, prHeadHash)
+			entry.Logger.Trace("reset worktree for migrator-required empty commit", "pr_number", giteaPullRequest.Index, "reset_to_sha", resetHash)
+			if err = worktree.Reset(&git.ResetOptions{Mode: git.HardReset, Commit: resetHash}); err != nil {
+				sendErr(fmt.Errorf("reset empty commit list pull request branch: %v", err))
 				entry.PRFailureCount++
-				continue
+				return
 			}
-			entry.Logger.Trace("detecting best common ancestor", "pr_number", giteaPullRequest.Index, "base", mergeBaseHash, "head", prHeadHash)
-			bases, err := mergeBaseCommit.MergeBase(prHeadCommit)
+
+			entry.Logger.Debug("creating empty migration commit", "pr_number", giteaPullRequest.Index)
+			prHeadHash, err = worktree.Commit("Migrator-required empty commit", &git.CommitOptions{
+				AllowEmptyCommits: true,
+				Author: &object.Signature{
+					Name:  "Gitea GitHub Migrator",
+					Email: "gitea-github-migrator@example.com",
+					When:  time.Now(),
+				},
+				Committer: &object.Signature{
+					Name:  "Gitea GitHub Migrator",
+					Email: "gitea-github-migrator@example.com",
+					When:  time.Now(),
+				},
+			})
 			if err != nil {
-				sendErr(fmt.Errorf("detecting best common ancestor: %v", err))
+				sendErr(fmt.Errorf("creating empty migration commit: %v", err))
 				entry.PRFailureCount++
-				continue
-			}
-			if len(bases) == 0 {
-				entry.Logger.Trace("orphaned head commit detected", "pr_number", giteaPullRequest.Index, "sha", prHeadHash)
-				tmpEmptyCommitRequired = true
+				return
 			}
 
-			if tmpEmptyCommitRequired {
-				entry.Logger.Trace("checkout source branch for empty commit list pull request", "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index)
-				if err = worktree.Checkout(&git.CheckoutOptions{
-					Create: h.Conditional(giteaPullRequest.State == gitea.StateOpen, false, true),
-					Force:  true,
-					Branch: plumbing.NewBranchReferenceName(h.Conditional(giteaPullRequest.State == gitea.StateClosed, sourceBranchForClosedPullRequest, giteaPullRequest.Head.Ref)),
-				}); err != nil {
-					sendErr(fmt.Errorf("checking out temporary empty commit list source branch for pull request #%d: %v", giteaPullRequest.Index, err))
-					entry.PRFailureCount++
-					continue
-				}
+			if strings.EqualFold(string(giteaPullRequest.State), string(gitea.StateOpen)) {
+				entry.Logger.Trace("pushing source branch for empty commit list pull request", "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index)
 
-				resetHash := h.Conditional(len(bases) == 0, mergeBaseHash, prHeadHash)
-				entry.Logger.Trace("reset worktree for migrator-required empty commit", "pr_number", giteaPullRequest.Index, "reset_to_sha", resetHash)
-				if err = worktree.Reset(&git.ResetOptions{Mode: git.HardReset, Commit: resetHash}); err != nil {
-					sendErr(fmt.Errorf("reset empty commit list pull request branch: %v", err))
-					entry.PRFailureCount++
-					continue
-				}
-
-				entry.Logger.Debug("creating empty migration commit", "pr_number", giteaPullRequest.Index)
-				prHeadHash, err = worktree.Commit("Migrator-required empty commit", &git.CommitOptions{
-					AllowEmptyCommits: true,
-					Author: &object.Signature{
-						Name:  "Gitea GitHub Migrator",
-						Email: "gitea-github-migrator@example.com",
-						When:  time.Now(),
-					},
-					Committer: &object.Signature{
-						Name:  "Gitea GitHub Migrator",
-						Email: "gitea-github-migrator@example.com",
-						When:  time.Now(),
-					},
-				})
-				if err != nil {
-					sendErr(fmt.Errorf("creating empty migration commit: %v", err))
-					entry.PRFailureCount++
-					continue
-				}
-
-				if strings.EqualFold(string(giteaPullRequest.State), string(gitea.StateOpen)) {
-					entry.Logger.Trace("pushing source branch for empty commit list pull request", "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index)
-
-					if err = gitRepo.PushContext(ctx, &git.PushOptions{
-						RemoteName: "github",
-						RefSpecs: []config.RefSpec{
-							config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", giteaPullRequest.Head.Ref)),
-						},
-						Force: true,
-					}); err != nil {
-						if errors.Is(err, git.NoErrAlreadyUpToDate) {
-							entry.Logger.Trace("empty commit list branch already exists and is up-to-date on GitHub", "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
-						} else {
-							sendErr(fmt.Errorf("pushing temporary empty commit list branch to github: %v", err))
-							entry.PRFailureCount++
-							continue
-						}
-					}
-				}
-			}
-
-			// Proceed to create temporary branches when migrating a merged/closed merge request that doesn't yet have a counterpart PR in GitHub (can't create one without a branch)
-			if !strings.EqualFold(string(giteaPullRequest.State), string(gitea.StateOpen)) {
-				entry.Logger.Trace("searching for existing branch for closed/merged pull request", "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index, "source_branch", giteaPullRequest.Head.Ref)
-
-				// Generate temporary branch names
-				giteaPullRequest.Head.Ref = sourceBranchForClosedPullRequest
-				giteaPullRequest.Base.Ref = targetBranchForClosedPullRequest
-
-				entry.Logger.Trace("creating target branch for merged/closed pull request", "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index, "branch", giteaPullRequest.Base.Ref, "sha", mergeBaseCommit.Hash)
-				if err = worktree.Checkout(&git.CheckoutOptions{
-					Create: true,
-					Force:  true,
-					Branch: plumbing.NewBranchReferenceName(giteaPullRequest.Base.Ref),
-					Hash:   mergeBaseCommit.Hash,
-				}); err != nil {
-					sendErr(fmt.Errorf("checking out temporary target branch: %v", err))
-					entry.PRFailureCount++
-					continue
-				}
-
-				entry.Logger.Trace("creating source branch for merged/closed pull request", "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index, "branch", giteaPullRequest.Head.Ref, "sha", prHeadHash)
-				if err = worktree.Checkout(&git.CheckoutOptions{
-					Create: h.Conditional(tmpEmptyCommitRequired, false, true),
-					Force:  true,
-					Branch: plumbing.NewBranchReferenceName(giteaPullRequest.Head.Ref),
-					Hash:   h.Conditional(tmpEmptyCommitRequired, plumbing.ZeroHash, prHeadHash),
-				}); err != nil {
-					sendErr(fmt.Errorf("checking out temporary source branch: %v", err))
-					entry.PRFailureCount++
-					continue
-				}
-
-				entry.Logger.Debug("pushing branches for merged/closed pull request", "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
 				if err = gitRepo.PushContext(ctx, &git.PushOptions{
 					RemoteName: "github",
 					RefSpecs: []config.RefSpec{
 						config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", giteaPullRequest.Head.Ref)),
-						config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", giteaPullRequest.Base.Ref)),
 					},
 					Force: true,
 				}); err != nil {
 					if errors.Is(err, git.NoErrAlreadyUpToDate) {
-						entry.Logger.Trace("branch already exists and is up-to-date on GitHub", "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
+						entry.Logger.Trace("empty commit list branch already exists and is up-to-date on GitHub", "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
 					} else {
-						sendErr(fmt.Errorf("pushing temporary branches to github: %v", err))
+						sendErr(fmt.Errorf("pushing temporary empty commit list branch to github: %v", err))
 						entry.PRFailureCount++
-						continue
+						return
 					}
 				}
-
-				// We will clean up these temporary branches after configuring and closing the pull request
-				cleanUpBranch = true
 			}
 		}
 
-		if defaultBranch != giteaRepository.DefaultBranch && giteaPullRequest.Base.Ref == giteaRepository.DefaultBranch {
-			entry.Logger.Trace("changing target trunk branch", "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index, "old_trunk", giteaRepository.DefaultBranch, "new_trunk", defaultBranch)
-			giteaPullRequest.Base.Ref = defaultBranch
-		}
-
-		originalState := ""
+		// Proceed to create temporary branches when migrating a merged/closed merge request that doesn't yet have a counterpart PR in GitHub (can't create one without a branch)
 		if !strings.EqualFold(string(giteaPullRequest.State), string(gitea.StateOpen)) {
-			if giteaPullRequest.HasMerged && giteaPullRequest.Merged != nil {
-				originalState = fmt.Sprintf("> This pull request was originally **merged** on Gitea")
-			} else {
-				originalState = fmt.Sprintf("> This pull request was originally **closed** on Gitea")
-			}
-		}
+			entry.Logger.Trace("searching for existing branch for closed/merged pull request", "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index, "source_branch", giteaPullRequest.Head.Ref)
 
-		entry.Logger.Debug("determining pull request approvers", "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index)
-		approvers := make([]string, 0)
-		reviews, _, err := gi.ListPullReviews(entry.GiteaOwner, entry.GiteaRepo, giteaPullRequest.Index, gitea.ListPullReviewsOptions{})
-		if err != nil {
-			sendErr(fmt.Errorf("listing pull request reviews: %v", err))
-		} else {
-			for _, review := range reviews {
-				if review.State == gitea.ReviewStateApproved {
-					approvers = append(approvers, h.GetGitHubAccountReference(review.Reviewer))
+			// Generate temporary branch names
+			giteaPullRequest.Head.Ref = sourceBranchForClosedPullRequest
+			giteaPullRequest.Base.Ref = targetBranchForClosedPullRequest
+
+			entry.Logger.Trace("creating target branch for merged/closed pull request", "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index, "branch", giteaPullRequest.Base.Ref, "sha", mergeBaseCommit.Hash)
+			if err = worktree.Checkout(&git.CheckoutOptions{
+				Create: true,
+				Force:  true,
+				Branch: plumbing.NewBranchReferenceName(giteaPullRequest.Base.Ref),
+				Hash:   mergeBaseCommit.Hash,
+			}); err != nil {
+				sendErr(fmt.Errorf("checking out temporary target branch: %v", err))
+				entry.PRFailureCount++
+				return
+			}
+
+			entry.Logger.Trace("creating source branch for merged/closed pull request", "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index, "branch", giteaPullRequest.Head.Ref, "sha", prHeadHash)
+			if err = worktree.Checkout(&git.CheckoutOptions{
+				Create: h.Conditional(tmpEmptyCommitRequired, false, true),
+				Force:  true,
+				Branch: plumbing.NewBranchReferenceName(giteaPullRequest.Head.Ref),
+				Hash:   h.Conditional(tmpEmptyCommitRequired, plumbing.ZeroHash, prHeadHash),
+			}); err != nil {
+				sendErr(fmt.Errorf("checking out temporary source branch: %v", err))
+				entry.PRFailureCount++
+				return
+			}
+
+			entry.Logger.Debug("pushing branches for merged/closed pull request", "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
+			if err = gitRepo.PushContext(ctx, &git.PushOptions{
+				RemoteName: "github",
+				RefSpecs: []config.RefSpec{
+					config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", giteaPullRequest.Head.Ref)),
+					config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", giteaPullRequest.Base.Ref)),
+				},
+				Force: true,
+			}); err != nil {
+				if errors.Is(err, git.NoErrAlreadyUpToDate) {
+					entry.Logger.Trace("branch already exists and is up-to-date on GitHub", "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
+				} else {
+					sendErr(fmt.Errorf("pushing temporary branches to github: %v", err))
+					entry.PRFailureCount++
+					return
 				}
 			}
-		}
 
-		description := giteaPullRequest.Body
-		if strings.TrimSpace(description) == "" {
-			description = "_No description_"
+			// We will clean up these temporary branches after configuring and closing the pull request
+			cleanUpBranch = true
 		}
+	}
 
-		slices.Sort(approvers)
-		approval := strings.Join(approvers, ", ")
-		if approval == "" {
-			approval = "_No approvers_"
+	if defaultBranch != giteaRepository.DefaultBranch && giteaPullRequest.Base.Ref == giteaRepository.DefaultBranch {
+		entry.Logger.Trace("changing target trunk branch", "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index, "old_trunk", giteaRepository.DefaultBranch, "new_trunk", defaultBranch)
+		giteaPullRequest.Base.Ref = defaultBranch
+	}
+
+	originalState := ""
+	if !strings.EqualFold(string(giteaPullRequest.State), string(gitea.StateOpen)) {
+		if giteaPullRequest.HasMerged && giteaPullRequest.Merged != nil {
+			originalState = fmt.Sprintf("> This pull request was originally **merged** on Gitea")
+		} else {
+			originalState = fmt.Sprintf("> This pull request was originally **closed** on Gitea")
 		}
+	}
 
-		closeDetails := ""
-		if giteaPullRequest.State == gitea.StateClosed {
-			if giteaPullRequest.HasMerged && giteaPullRequest.Merged != nil {
-				closeDetails = fmt.Sprintf("\n> | **Date Originally Merged** | %s |\n> | **Original Merger** | %s |\n> | **Merge Commit** | %s |", giteaPullRequest.Merged.Format(constants.DateFormat), giteaPullRequest.MergedBy.UserName, *giteaPullRequest.MergedCommitID)
-			} else if giteaPullRequest.Closed != nil {
-				closeDetails = fmt.Sprintf("\n> | **Date Originally Closed** | %s |", giteaPullRequest.Closed.Format(constants.DateFormat))
+	entry.Logger.Debug("determining pull request approvers", "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index)
+	approvers := make([]string, 0)
+	reviews, _, err := gi.ListPullReviews(entry.GiteaOwner, entry.GiteaRepo, giteaPullRequest.Index, gitea.ListPullReviewsOptions{})
+	if err != nil {
+		sendErr(fmt.Errorf("listing pull request reviews: %v", err))
+	} else {
+		for _, review := range reviews {
+			if review.State == gitea.ReviewStateApproved {
+				approvers = append(approvers, h.GetGitHubAccountReference(review.Reviewer))
 			}
 		}
+	}
 
-		body := fmt.Sprintf(`> [!NOTE]
+	description := giteaPullRequest.Body
+	if strings.TrimSpace(description) == "" {
+		description = "_No description_"
+	}
+
+	slices.Sort(approvers)
+	approval := strings.Join(approvers, ", ")
+	if approval == "" {
+		approval = "_No approvers_"
+	}
+
+	closeDetails := ""
+	if giteaPullRequest.State == gitea.StateClosed {
+		if giteaPullRequest.HasMerged && giteaPullRequest.Merged != nil {
+			closeDetails = fmt.Sprintf("\n> | **Date Originally Merged** | %s |\n> | **Original Merger** | %s |\n> | **Merge Commit** | %s |", giteaPullRequest.Merged.Format(constants.DateFormat), giteaPullRequest.MergedBy.UserName, *giteaPullRequest.MergedCommitID)
+		} else if giteaPullRequest.Closed != nil {
+			closeDetails = fmt.Sprintf("\n> | **Date Originally Closed** | %s |", giteaPullRequest.Closed.Format(constants.DateFormat))
+		}
+	}
+
+	body := fmt.Sprintf(`> [!NOTE]
 > This pull request was migrated from Gitea
 >
 > |      |      |
@@ -820,170 +823,165 @@ func migratePullRequests(ctx context.Context, entry *migration.Entry, defaultBra
 
 %[3]s`, h.GetGitHubAccountReference(giteaPullRequest.Poster), giteaPullRequest.Index, description, entry.GiteaOwner, entry.GiteaRepo, giteaPullRequest.Created.Format(constants.DateFormat), closeDetails, approval, originalState, giteaDomain, giteaPullRequest.Title)
 
-		if len(body) > constants.GithubBodyLimit {
-			entry.Logger.Warn("pull request body was truncated due to platform limits", "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
-			body = h.SmartRenovateBodyTruncate(body)
-		}
+	if len(body) > constants.GithubBodyLimit {
+		entry.Logger.Warn("pull request body was truncated due to platform limits", "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
+		body = h.SmartRenovateBodyTruncate(body)
+	}
 
-		if githubPullRequest == nil {
-			entry.Logger.Info("creating pull request", "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
-			newPullRequest := github.NewPullRequest{
-				Title:               &giteaPullRequest.Title,
-				Head:                &giteaPullRequest.Head.Ref,
-				Base:                &giteaPullRequest.Base.Ref,
-				Body:                &body,
-				MaintainerCanModify: h.Pointer(true),
-				Draft:               &giteaPullRequest.Draft,
-			}
-			if githubPullRequest, _, err = gh.PullRequests.Create(ctx, entry.GitHubOwner, entry.GitHubRepo, &newPullRequest); err != nil {
-				sendErr(fmt.Errorf("creating pull request: %v", err))
+	if githubPullRequest == nil {
+		entry.Logger.Info("creating pull request", "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
+		newPullRequest := github.NewPullRequest{
+			Title:               &giteaPullRequest.Title,
+			Head:                &giteaPullRequest.Head.Ref,
+			Base:                &giteaPullRequest.Base.Ref,
+			Body:                &body,
+			MaintainerCanModify: h.Pointer(true),
+			Draft:               &giteaPullRequest.Draft,
+		}
+		if githubPullRequest, _, err = gh.PullRequests.Create(ctx, entry.GitHubOwner, entry.GitHubRepo, &newPullRequest); err != nil {
+			sendErr(fmt.Errorf("creating pull request: %v", err))
+			entry.PRFailureCount++
+			return
+		}
+		time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
+
+		if tmpEmptyCommitRequired {
+			entry.Logger.Debug("reset empty commit list pull request branch to actual commit", "pr_number", giteaPullRequest.Index, "source_branch", giteaPullRequest.Head.Ref, "actual_commit", prHeadRef)
+			if err = worktree.Checkout(&git.CheckoutOptions{
+				Create: false,
+				Force:  true,
+				Branch: plumbing.NewBranchReferenceName(giteaPullRequest.Head.Ref),
+			}); err != nil {
+				sendErr(fmt.Errorf("checking out to-reset empty commit list branch: %v", err))
 				entry.PRFailureCount++
-				continue
-			}
-			time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
-
-			if tmpEmptyCommitRequired {
-				entry.Logger.Debug("reset empty commit list pull request branch to actual commit", "pr_number", giteaPullRequest.Index, "source_branch", giteaPullRequest.Head.Ref, "actual_commit", prHeadRef)
-				if err = worktree.Checkout(&git.CheckoutOptions{
-					Create: false,
-					Force:  true,
-					Branch: plumbing.NewBranchReferenceName(giteaPullRequest.Head.Ref),
-				}); err != nil {
-					sendErr(fmt.Errorf("checking out to-reset empty commit list branch: %v", err))
-					entry.PRFailureCount++
-					continue
-				}
-
-				if err = worktree.Reset(&git.ResetOptions{Mode: git.HardReset, Commit: plumbing.NewHash(prHeadRef)}); err != nil {
-					sendErr(fmt.Errorf("reset empty commit list pull request branch: %v", err))
-					entry.PRFailureCount++
-					continue
-				}
-
-				entry.Logger.Trace("pushing reset empty commit list pull request branch", "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index)
-
-				if err = gitRepo.PushContext(ctx, &git.PushOptions{
-					RemoteName: "github",
-					RefSpecs: []config.RefSpec{
-						config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", giteaPullRequest.Head.Ref)),
-					},
-					Force: true,
-				}); err != nil {
-					if errors.Is(err, git.NoErrAlreadyUpToDate) {
-						entry.Logger.Trace("empty commit list branch already exists and is up-to-date on GitHub", "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
-					} else {
-						sendErr(fmt.Errorf("pushing reset temporary empty commit list branch to github: %v", err))
-						entry.PRFailureCount++
-						continue
-					}
-				}
-				githubPullRequest.Head.SHA = h.Pointer(prHeadRef)
-				if githubPullRequest, _, err = gh.PullRequests.Edit(ctx, entry.GitHubOwner, entry.GitHubRepo, githubPullRequest.GetNumber(), githubPullRequest); err != nil {
-					sendErr(fmt.Errorf("updating pull request: %v", err))
-					entry.PRFailureCount++
-					continue
-				}
-				time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
-
-				entry.Logger.Debug("creating empty commit list auto-close comment", "pr_number", giteaPullRequest.Index)
-				newComment := github.IssueComment{
-					Body: h.Pointer(`> [!CAUTION]
->
-> **Due to platform limitations in handling PRs with empty commit history or orphaned commits, this PR was flagged as "merged" or "closed". This does not necessarily represent its original state within Gitea.**`),
-				}
-				if _, _, err = gh.Issues.CreateComment(ctx, entry.GitHubOwner, entry.GitHubRepo, githubPullRequest.GetNumber(), &newComment); err != nil {
-					sendErr(fmt.Errorf("creating empty commit list auto-close comment: %v", err))
-					entry.PRFailureCount++
-				}
-				time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
+				return
 			}
 
-			if giteaPullRequest.State == gitea.StateClosed {
-				entry.Logger.Debug("closing pull request", "pr_number", githubPullRequest.GetNumber())
-
-				githubPullRequest.State = h.Pointer("closed")
-				if githubPullRequest, _, err = gh.PullRequests.Edit(ctx, entry.GitHubOwner, entry.GitHubRepo, githubPullRequest.GetNumber(), githubPullRequest); err != nil {
-					sendErr(fmt.Errorf("updating pull request: %v", err))
-					entry.PRFailureCount++
-					continue
-				}
-				time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
+			if err = worktree.Reset(&git.ResetOptions{Mode: git.HardReset, Commit: plumbing.NewHash(prHeadRef)}); err != nil {
+				sendErr(fmt.Errorf("reset empty commit list pull request branch: %v", err))
+				entry.PRFailureCount++
+				return
 			}
 
-		} else {
-			var newState *string
-			switch giteaPullRequest.State {
-			case "opened":
-				newState = h.Pointer("open")
-			case "closed", "merged":
-				newState = h.Pointer("closed")
-			}
+			entry.Logger.Trace("pushing reset empty commit list pull request branch", "repository_id", giteaRepository.ID, "pr_number", giteaPullRequest.Index)
 
-			if githubPullRequest.State != nil && newState != nil && *githubPullRequest.State != *newState {
-				pullRequestState := &github.PullRequest{
-					Number: githubPullRequest.Number,
-					State:  newState,
-				}
-
-				if githubPullRequest, _, err = gh.PullRequests.Edit(ctx, entry.GitHubOwner, entry.GitHubRepo, pullRequestState.GetNumber(), pullRequestState); err != nil {
-					sendErr(fmt.Errorf("updating pull request state: %v", err))
-					entry.PRFailureCount++
-					continue
-				}
-				time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
-			}
-
-			if (newState != nil && (githubPullRequest.State == nil || *githubPullRequest.State != *newState)) ||
-				(githubPullRequest.Title == nil || *githubPullRequest.Title != giteaPullRequest.Title) ||
-				(githubPullRequest.Body == nil || *githubPullRequest.Body != body) ||
-				(githubPullRequest.Draft == nil || *githubPullRequest.Draft != giteaPullRequest.Draft) {
-				entry.Logger.Info("updating pull request", "pr_number", githubPullRequest.GetNumber())
-
-				githubPullRequest.Title = &giteaPullRequest.Title
-				githubPullRequest.Body = &body
-				githubPullRequest.Draft = &giteaPullRequest.Draft
-				githubPullRequest.MaintainerCanModify = nil
-				if githubPullRequest, _, err = gh.PullRequests.Edit(ctx, entry.GitHubOwner, entry.GitHubRepo, githubPullRequest.GetNumber(), githubPullRequest); err != nil {
-					sendErr(fmt.Errorf("updating pull request: %v", err))
-					entry.PRFailureCount++
-					continue
-				}
-				time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
-			} else {
-				entry.Logger.Trace("existing pull request is up-to-date", "pr_number", githubPullRequest.GetNumber())
-			}
-		}
-
-		if cleanUpBranch {
-			entry.Logger.Debug("deleting temporary branches for closed pull request", "pr_number", githubPullRequest.GetNumber(), "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
 			if err = gitRepo.PushContext(ctx, &git.PushOptions{
 				RemoteName: "github",
 				RefSpecs: []config.RefSpec{
-					config.RefSpec(fmt.Sprintf(":refs/heads/%s", giteaPullRequest.Head.Ref)),
-					config.RefSpec(fmt.Sprintf(":refs/heads/%s", giteaPullRequest.Base.Ref)),
+					config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", giteaPullRequest.Head.Ref)),
 				},
 				Force: true,
 			}); err != nil {
 				if errors.Is(err, git.NoErrAlreadyUpToDate) {
-					entry.Logger.Trace("branches already deleted on GitHub", "pr_number", githubPullRequest.GetNumber(), "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
+					entry.Logger.Trace("empty commit list branch already exists and is up-to-date on GitHub", "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
 				} else {
-					sendErr(fmt.Errorf("pushing branch deletions to github: %v", err))
+					sendErr(fmt.Errorf("pushing reset temporary empty commit list branch to github: %v", err))
 					entry.PRFailureCount++
-					continue
+					return
 				}
 			}
+			githubPullRequest.Head.SHA = h.Pointer(prHeadRef)
+			if githubPullRequest, _, err = gh.PullRequests.Edit(ctx, entry.GitHubOwner, entry.GitHubRepo, githubPullRequest.GetNumber(), githubPullRequest); err != nil {
+				sendErr(fmt.Errorf("updating pull request: %v", err))
+				entry.PRFailureCount++
+				return
+			}
+			time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
+
+			entry.Logger.Debug("creating empty commit list auto-close comment", "pr_number", giteaPullRequest.Index)
+			newComment := github.IssueComment{
+				Body: h.Pointer(`> [!CAUTION]
+>
+> **Due to platform limitations in handling PRs with empty commit history or orphaned commits, this PR was flagged as "merged" or "closed". This does not necessarily represent its original state within Gitea.**`),
+			}
+			if _, _, err = gh.Issues.CreateComment(ctx, entry.GitHubOwner, entry.GitHubRepo, githubPullRequest.GetNumber(), &newComment); err != nil {
+				sendErr(fmt.Errorf("creating empty commit list auto-close comment: %v", err))
+				entry.PRFailureCount++
+			}
+			time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
 		}
 
-		err = entry.MigrateComments(ctx, giteaPullRequest.Index, githubPullRequest.GetNumber())
-		if err != nil {
-			sendErr(err)
-			entry.PRFailureCount++
+		if giteaPullRequest.State == gitea.StateClosed {
+			entry.Logger.Debug("closing pull request", "pr_number", githubPullRequest.GetNumber())
+
+			githubPullRequest.State = h.Pointer("closed")
+			if githubPullRequest, _, err = gh.PullRequests.Edit(ctx, entry.GitHubOwner, entry.GitHubRepo, githubPullRequest.GetNumber(), githubPullRequest); err != nil {
+				sendErr(fmt.Errorf("updating pull request: %v", err))
+				entry.PRFailureCount++
+				return
+			}
+			time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
+		}
+
+	} else {
+		var newState *string
+		switch giteaPullRequest.State {
+		case "opened":
+			newState = h.Pointer("open")
+		case "closed", "merged":
+			newState = h.Pointer("closed")
+		}
+
+		if githubPullRequest.State != nil && newState != nil && *githubPullRequest.State != *newState {
+			pullRequestState := &github.PullRequest{
+				Number: githubPullRequest.Number,
+				State:  newState,
+			}
+
+			if githubPullRequest, _, err = gh.PullRequests.Edit(ctx, entry.GitHubOwner, entry.GitHubRepo, pullRequestState.GetNumber(), pullRequestState); err != nil {
+				sendErr(fmt.Errorf("updating pull request state: %v", err))
+				entry.PRFailureCount++
+				return
+			}
+			time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
+		}
+
+		if (newState != nil && (githubPullRequest.State == nil || *githubPullRequest.State != *newState)) ||
+			(githubPullRequest.Title == nil || *githubPullRequest.Title != giteaPullRequest.Title) ||
+			(githubPullRequest.Body == nil || *githubPullRequest.Body != body) ||
+			(githubPullRequest.Draft == nil || *githubPullRequest.Draft != giteaPullRequest.Draft) {
+			entry.Logger.Info("updating pull request", "pr_number", githubPullRequest.GetNumber())
+
+			githubPullRequest.Title = &giteaPullRequest.Title
+			githubPullRequest.Body = &body
+			githubPullRequest.Draft = &giteaPullRequest.Draft
+			githubPullRequest.MaintainerCanModify = nil
+			if githubPullRequest, _, err = gh.PullRequests.Edit(ctx, entry.GitHubOwner, entry.GitHubRepo, githubPullRequest.GetNumber(), githubPullRequest); err != nil {
+				sendErr(fmt.Errorf("updating pull request: %v", err))
+				entry.PRFailureCount++
+				return
+			}
+			time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
 		} else {
-			entry.PRSuccessCount++
+			entry.Logger.Trace("existing pull request is up-to-date", "pr_number", githubPullRequest.GetNumber())
 		}
 	}
 
-	skippedCount := totalCount - entry.PRSuccessCount - entry.PRFailureCount
+	if cleanUpBranch {
+		entry.Logger.Debug("deleting temporary branches for closed pull request", "pr_number", githubPullRequest.GetNumber(), "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
+		if err = gitRepo.PushContext(ctx, &git.PushOptions{
+			RemoteName: "github",
+			RefSpecs: []config.RefSpec{
+				config.RefSpec(fmt.Sprintf(":refs/heads/%s", giteaPullRequest.Head.Ref)),
+				config.RefSpec(fmt.Sprintf(":refs/heads/%s", giteaPullRequest.Base.Ref)),
+			},
+			Force: true,
+		}); err != nil {
+			if errors.Is(err, git.NoErrAlreadyUpToDate) {
+				entry.Logger.Trace("branches already deleted on GitHub", "pr_number", githubPullRequest.GetNumber(), "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
+			} else {
+				sendErr(fmt.Errorf("pushing branch deletions to github: %v", err))
+				entry.PRFailureCount++
+				return
+			}
+		}
+	}
 
-	entry.Logger.Info("migrated pull requests from Gitea to GitHub", "successful", entry.PRSuccessCount, "failed", entry.PRFailureCount, "skipped", skippedCount)
+	err = entry.MigrateComments(ctx, giteaPullRequest.Index, githubPullRequest.GetNumber())
+	if err != nil {
+		sendErr(err)
+		entry.PRFailureCount++
+	} else {
+		entry.PRSuccessCount++
+	}
 }
