@@ -36,7 +36,7 @@ import (
 )
 
 var loop, report bool
-var deleteExistingRepos, enablePullRequests, renameMasterToMain bool
+var deleteExistingRepos, enablePullRequests, enableIssues, renameMasterToMain bool
 var githubDomain, githubRepo, githubToken, githubUser, giteaDomain, giteaProject, giteaToken, projectsCsvPath, renameTrunkBranch string
 
 var (
@@ -53,6 +53,7 @@ type Project = []string
 type Report struct {
 	OwnerName         string
 	RepoName          string
+	IssuesCount       int
 	PullRequestsCount int
 }
 
@@ -108,6 +109,7 @@ func main() {
 
 	flag.BoolVar(&deleteExistingRepos, "delete-existing-repos", false, "whether existing repositories should be deleted before migrating")
 	flag.BoolVar(&enablePullRequests, "migrate-pull-requests", false, "whether pull requests should be migrated")
+	flag.BoolVar(&enableIssues, "migrate-issues", false, "whether issues should be migrated")
 	flag.BoolVar(&renameMasterToMain, "rename-master-to-main", false, "rename master branch to main and update pull requests (incompatible with -rename-trunk-branch)")
 
 	flag.StringVar(&githubDomain, "github-domain", constants.DefaultGithubDomain, "specifies the GitHub domain to use")
@@ -221,19 +223,27 @@ func printReport(ctx context.Context, projects []Project) {
 
 	fmt.Println()
 
+	totalIssues := 0
 	totalPullRequests := 0
 	for _, result := range results {
+		totalIssues += result.IssuesCount
 		totalPullRequests += result.PullRequestsCount
 		fmt.Printf("%#v\n", result)
 	}
 
 	fmt.Println()
+	fmt.Printf("Total issues: %d\n", totalIssues)
 	fmt.Printf("Total pull requests: %d\n", totalPullRequests)
 	fmt.Println()
 }
 
 func reportProject(ctx context.Context, proj []string) (*Report, error) {
 	entry, err := migration.NewEntry(proj[0], proj[1], gi, gh, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	_, issueCount, err := entry.GetAllGiteaIssues(ctx, true)
 	if err != nil {
 		return nil, err
 	}
@@ -246,6 +256,7 @@ func reportProject(ctx context.Context, proj []string) (*Report, error) {
 	return &Report{
 		OwnerName:         entry.GiteaOwner,
 		RepoName:          entry.GiteaRepo,
+		IssuesCount:       issueCount,
 		PullRequestsCount: prCount,
 	}, nil
 }
@@ -478,6 +489,30 @@ func migrateProject(ctx context.Context, proj []string) error {
 	}
 	if _, _, err = gh.Repositories.Edit(ctx, entry.GitHubOwner, entry.GitHubRepo, &updateRepo); err != nil {
 		return fmt.Errorf("setting default branch: %v", err)
+	}
+
+	if enableIssues {
+		giteaIssues, totalCount, err := entry.GetAllGiteaIssues(ctx, false)
+		if err != nil {
+			return err
+		}
+
+		entry.Logger.Info("migrating issues from Gitea to GitHub", "count", totalCount)
+		for _, giteaIssue := range giteaIssues {
+			if giteaIssue == nil {
+				continue
+			}
+
+			if err := ctx.Err(); err != nil {
+				sendErr(fmt.Errorf("preparing to migrate issue: %v", err))
+				break
+			}
+
+			migrateIssue(ctx, entry, createRepo, giteaIssue)
+		}
+
+		skippedCount := totalCount - entry.IssueSuccessCount - entry.IssueFailureCount
+		entry.Logger.Info("migrated issues from Gitea to GitHub", "successful", entry.IssueSuccessCount, "failed", entry.IssueFailureCount, "skipped", skippedCount)
 	}
 
 	if enablePullRequests {
@@ -973,5 +1008,150 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 		entry.PRFailureCount++
 	} else {
 		entry.PRSuccessCount++
+	}
+}
+
+func migrateIssue(ctx context.Context, entry *migration.Entry, initialMigration bool, giteaIssue *gitea.Issue) {
+	var githubIssue *github.Issue
+
+	if !initialMigration {
+		entry.Logger.Debug("searching for any existing issue", "issue_number", giteaIssue.Index)
+		query := fmt.Sprintf("repo:%s/%s AND is:issue AND \"Gitea Issue Number\" \"[%d]\" in:body", entry.GitHubOwner, entry.GitHubRepo, giteaIssue.Index)
+		searchResult, err := getGithubSearchResults(ctx, query)
+		if err != nil {
+			sendErr(fmt.Errorf("listing issues: %v", err))
+			return
+		}
+
+		for _, issue := range searchResult.Issues {
+			if issue == nil {
+				continue
+			}
+
+			if err := ctx.Err(); err != nil {
+				sendErr(fmt.Errorf("preparing to retrieve issue: %v", err))
+				break
+			}
+
+			if !issue.IsPullRequest() && strings.Contains(issue.GetBody(), fmt.Sprintf("**Gitea Issue Number** | [%d]", giteaIssue.Index)) {
+				entry.Logger.Debug("found existing issue", "issue_number", issue.GetNumber())
+				githubIssue = issue
+				break
+			}
+		}
+	}
+
+	description := giteaIssue.Body
+	if strings.TrimSpace(description) == "" {
+		description = "_No description_"
+	}
+
+	originalState := ""
+	if giteaIssue.State == gitea.StateClosed {
+		originalState = "> This issue was originally **closed** on Gitea"
+	}
+
+	closeDetails := ""
+	if giteaIssue.State == gitea.StateClosed && giteaIssue.Closed != nil {
+		closeDetails = fmt.Sprintf("\n> | **Date Originally Closed** | %s |", giteaIssue.Closed.Format(constants.DateFormat))
+	}
+
+	body := fmt.Sprintf(`> [!NOTE]
+> This issue was migrated from Gitea
+>
+> |      |      |
+> | ---- | ---- |
+> | **Original Author** | %[1]s |
+> | **Gitea Repository** | [%[3]s/%[4]s](https://%[6]s/%[3]s/%[4]s) |
+> | **Gitea Issue** | [%[7]s](https://%[6]s/%[3]s/%[4]s/issues/%[2]d) |
+> | **Gitea Issue Number** | [%[2]d](https://%[6]s/%[3]s/%[4]s/issues/%[2]d) |
+> | **Date Originally Opened** | %[5]s |%[8]s
+> |      |      |
+>
+%[9]s
+
+## Original Description
+
+%[10]s`,
+		h.GetGitHubAccountReference(giteaIssue.Poster),
+		giteaIssue.Index,
+		entry.GiteaOwner,
+		entry.GiteaRepo,
+		giteaIssue.Created.Format(constants.DateFormat),
+		giteaDomain,
+		giteaIssue.Title,
+		closeDetails,
+		originalState,
+		description)
+
+	if len(body) > constants.GithubBodyLimit {
+		entry.Logger.Warn("issue body was truncated due to platform limits", "issue_number", giteaIssue.Index)
+		body = h.SmartRenovateBodyTruncate(body)
+	}
+
+	if githubIssue == nil {
+		entry.Logger.Info("creating issue", "issue_number", giteaIssue.Index)
+		createdIssue, _, err := gh.Issues.Create(ctx, entry.GitHubOwner, entry.GitHubRepo, &github.IssueRequest{
+			Title: &giteaIssue.Title,
+			Body:  &body,
+		})
+		if err != nil {
+			sendErr(fmt.Errorf("creating issue: %v", err))
+			entry.IssueFailureCount++
+			return
+		}
+		githubIssue = createdIssue
+		time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
+
+		if giteaIssue.State == gitea.StateClosed {
+			entry.Logger.Debug("closing issue", "issue_number", githubIssue.GetNumber())
+			if _, _, err = gh.Issues.Edit(ctx, entry.GitHubOwner, entry.GitHubRepo, githubIssue.GetNumber(), &github.IssueRequest{State: h.Pointer("closed")}); err != nil {
+				sendErr(fmt.Errorf("closing issue: %v", err))
+				entry.IssueFailureCount++
+				return
+			}
+			time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
+		}
+	} else {
+		var newState *string
+		if giteaIssue.State == gitea.StateClosed {
+			newState = h.Pointer("closed")
+		} else {
+			newState = h.Pointer("open")
+		}
+
+		if githubIssue.State != nil && *githubIssue.State != *newState {
+			entry.Logger.Debug("updating issue state", "issue_number", githubIssue.GetNumber(), "state", *newState)
+			if _, _, err := gh.Issues.Edit(ctx, entry.GitHubOwner, entry.GitHubRepo, githubIssue.GetNumber(), &github.IssueRequest{State: newState}); err != nil {
+				sendErr(fmt.Errorf("updating issue state: %v", err))
+				entry.IssueFailureCount++
+				return
+			}
+			time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
+		}
+
+		if (githubIssue.Title == nil || *githubIssue.Title != giteaIssue.Title) ||
+			(githubIssue.Body == nil || *githubIssue.Body != body) {
+			entry.Logger.Info("updating issue", "issue_number", githubIssue.GetNumber())
+			if _, _, err := gh.Issues.Edit(ctx, entry.GitHubOwner, entry.GitHubRepo, githubIssue.GetNumber(), &github.IssueRequest{
+				Title: &giteaIssue.Title,
+				Body:  &body,
+			}); err != nil {
+				sendErr(fmt.Errorf("updating issue: %v", err))
+				entry.IssueFailureCount++
+				return
+			}
+			time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
+		} else {
+			entry.Logger.Trace("existing issue is up-to-date", "issue_number", githubIssue.GetNumber())
+		}
+	}
+
+	err := entry.MigrateComments(ctx, giteaIssue.Index, githubIssue.GetNumber())
+	if err != nil {
+		sendErr(err)
+		entry.IssueFailureCount++
+	} else {
+		entry.IssueSuccessCount++
 	}
 }

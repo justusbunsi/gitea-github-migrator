@@ -7,9 +7,10 @@ This tool can migrate projects from Gitea to repositories on GitHub. It currentl
 
 * migrating the git repository with full history
 * migrating pull requests and translating them into pull requests, including closed/merged ones
+* migrating issues, including closed ones
 * renaming the `master` branch to `main` along the way
 
-It does not support migrating issues, wikis or any other primitive at this time. PRs welcome! (Although please don't waste your time suggesting swathing changes by an LLM)
+It does not support migrating wikis or any other primitive at this time. PRs welcome! (Although please don't waste your time suggesting swathing changes by an LLM)
 
 Both gitea.com and Gitea self-hosted are supported, as well as github.com and GitHub Enterprise (latter untested).
 
@@ -29,7 +30,7 @@ Golang 1.23 was used, you may have luck with earlier releases.
 _Example Usage_
 
 ```
-gitea-github-migrator -github-user=mytokenuser -gitea-project=mygiteauser/myproject -github-repo=mygithubuser/myrepo -migrate-pull-requests
+gitea-github-migrator -github-user=mytokenuser -gitea-project=mygiteauser/myproject -github-repo=mygithubuser/myrepo -migrate-pull-requests -migrate-issues
 ```
 
 Written in Go, this is a cross-platform CLI utility that accepts the following runtime arguments:
@@ -53,6 +54,8 @@ Written in Go, this is a cross-platform CLI utility that accepts the following r
         how many projects to migrate in parallel (default 4)
   -migrate-pull-requests
         whether pull requests should be migrated
+  -migrate-issues
+        whether issues should be migrated
   -projects-csv string
         specifies the path to a CSV file describing projects to migrate (incompatible with -gitea-project and -github-repo)
   -rename-master-to-main
@@ -75,6 +78,8 @@ gitea-org-or-user/gitea-project-name,github-org-or-user/github-repo-name
 For authentication, the `GITEA_TOKEN` and `GITHUB_TOKEN` environment variables must be populated. You cannot specify tokens as command-line arguments.
 
 To enable migration of Gitea pull requests to GitHub pull requests (including closed/merged ones!), specify `-migrate-pull-requests`.
+
+To enable migration of Gitea issues to GitHub issues (including closed ones!), specify `-migrate-issues`.
 
 To delete existing GitHub repos prior to migrating, pass the `-delete-existing-repos` argument. _This is potentially dangerous, you won't be asked for confirmation._
 
@@ -103,11 +108,11 @@ The tool maintains a thread-safe in-memory cache for certain primitives, in orde
 
 ## Idempotence
 
-This tool tries to be idempotent. You can run it over and over and it will patch the GitHub repository, along with its pull requests, to match what you have in Gitea. This should help you migrate a number of projects without enacting a large maintenance window.
+This tool tries to be idempotent. You can run it over and over and it will patch the GitHub repository, along with its pull requests and issues, to match what you have in Gitea. This should help you migrate a number of projects without enacting a large maintenance window.
 
 _Note that this tool performs a forced mirror push, so it's not recommended to run this tool after commencing work in the target repository._
 
-For pull requests and their comments, the corresponding IDs from Gitea are added to the Markdown header, this is parsed to enable idempotence (see next section).
+For pull requests, issues and their comments, the corresponding IDs from Gitea are added to the Markdown header, this is parsed to enable idempotence (see next section).
 
 ## Pull Requests
 
@@ -126,6 +131,16 @@ _Example migrated pull request (open)_
 _Example migrated pull request (closed)_
 
 ![example migrated closed pull request](pr-example-closed.jpeg)
+
+## Issues
+
+Whilst the git repository will be migrated verbatim, the issues are managed using the GitHub API and typically will be authored by the person supplying the authentication token.
+
+Each issue, along with every comment, will be prepended with a Markdown table showing the original author and some other metadata that is useful to know. This is also used to map issues and their comments to their counterparts in Gitea and enables the tool to be idempotent.
+
+As a bonus, if your Gitea users add the URL to their GitHub profile in the `Website` field of their Gitea profile, this tool will add a link to their GitHub profile in the markdown header of any issue or comment they originally authored.
+
+The design of migrated description and comments is similar to the Pull Request design. See previous section.
 
 ## Contributing, reporting bugs etc...
 

@@ -16,8 +16,10 @@ type Entry struct {
 	GitHubOwner     string
 	GitHubRepo      string
 	Logger          hclog.Logger
-	PRSuccessCount  int
-	PRFailureCount  int
+	PRSuccessCount    int
+	PRFailureCount    int
+	IssueSuccessCount int
+	IssueFailureCount int
 	GiteaRepository *gitea.Repository
 	GitRepo         *git.Repository
 	giteaClient     *gitea.Client
