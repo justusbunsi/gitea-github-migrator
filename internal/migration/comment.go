@@ -18,6 +18,11 @@ func (e *Entry) MigrateComments(ctx context.Context, giteaItemId int64, githubIt
 
 	e.Logger.Debug("retrieving Gitea comments", "item_id", giteaItemId)
 	for {
+		// Check for context cancellation
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("retrieving gitea comments: %v", err)
+		}
+
 		result, resp, err := e.giteaClient.ListIssueComments(e.GiteaOwner, e.GiteaRepo, giteaItemId, gitea.ListIssueCommentOptions{})
 		if err != nil {
 			return fmt.Errorf("listing gitea comments: %v", err)
@@ -52,6 +57,11 @@ func (e *Entry) MigrateComments(ctx context.Context, giteaItemId int64, githubIt
 	for _, comment := range giteaComments {
 		if comment == nil {
 			continue
+		}
+
+		// Check for context cancellation
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("migrating comments: %v", err)
 		}
 
 		commentBody := fmt.Sprintf(`> [!NOTE]

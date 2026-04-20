@@ -32,6 +32,7 @@ func (e *Entry) GetAllGiteaIssues(ctx context.Context, issueType gitea.IssueType
 	e.Logger.Info(logMessage)
 
 	for {
+		// Check for context cancellation
 		if err := ctx.Err(); err != nil {
 			return nil, 0, fmt.Errorf("%s: %v", logMessage, err)
 		}
