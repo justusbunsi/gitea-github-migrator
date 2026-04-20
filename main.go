@@ -641,8 +641,11 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 		return fmt.Errorf("identifying suitable merge base for pull request %d", giteaPullRequest.Index)
 	}
 
-	sourceBranchForClosedPullRequest := fmt.Sprintf("migration-source-%d/%s", giteaPullRequest.Index, giteaPullRequest.Head.Ref)
+	sourceBranchForClosedOrOpenForkPullRequest := fmt.Sprintf("migration-source-%d/%s", giteaPullRequest.Index, giteaPullRequest.Head.Ref)
 	targetBranchForClosedPullRequest := fmt.Sprintf("migration-target-%d/%s", giteaPullRequest.Index, giteaPullRequest.Base.Ref)
+
+	isForkPR := giteaPullRequest.Head.Repository == nil || giteaPullRequest.Head.Repository.ID != entry.GiteaRepository.ID
+	isOpenForkPR := isForkPR && strings.EqualFold(string(giteaPullRequest.State), string(gitea.StateOpen))
 
 	var cleanUpBranch, tmpEmptyCommitRequired bool
 	var githubPullRequest *github.PullRequest
@@ -664,7 +667,7 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 
 	if !initialMigration {
 		entry.Logger.Debug("searching for any existing pull request", "pr_number", giteaPullRequest.Index)
-		sourceBranches := []string{giteaPullRequest.Head.Ref, sourceBranchForClosedPullRequest}
+		sourceBranches := []string{giteaPullRequest.Head.Ref, sourceBranchForClosedOrOpenForkPullRequest}
 		branchQuery := fmt.Sprintf("head:%s", strings.Join(sourceBranches, " OR head:"))
 		query := fmt.Sprintf("repo:%s/%s AND is:pr AND (%s)", entry.GitHubOwner, entry.GitHubRepo, branchQuery)
 		searchResult, err := getGithubSearchResults(ctx, query)
@@ -743,12 +746,47 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 			tmpEmptyCommitRequired = true
 		}
 
+		if isOpenForkPR {
+			entry.Logger.Trace("checkout source branch for open pull request from fork", "repository_id", entry.GiteaRepository.ID, "pr_number", giteaPullRequest.Index)
+			if err = worktree.Checkout(&git.CheckoutOptions{
+				Create: true,
+				Force:  true,
+				Branch: plumbing.NewBranchReferenceName(sourceBranchForClosedOrOpenForkPullRequest),
+				Hash:   h.Conditional(tmpEmptyCommitRequired, plumbing.ZeroHash, prHeadHash),
+			}); err != nil {
+				return fmt.Errorf("checking out source branch for open pull request from fork #%d: %v", giteaPullRequest.Index, err)
+			}
+
+			entry.Logger.Trace("pushing source branch for open pull request from fork", "repository_id", entry.GiteaRepository.ID, "pr_number", giteaPullRequest.Index)
+
+			if err = entry.GitRepo.PushContext(ctx, &git.PushOptions{
+				RemoteName: "github",
+				RefSpecs: []config.RefSpec{
+					config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", sourceBranchForClosedOrOpenForkPullRequest)),
+				},
+				Force: true,
+			}); err != nil {
+				if errors.Is(err, git.NoErrAlreadyUpToDate) {
+					entry.Logger.Trace("open fork PR branch already exists and is up-to-date on GitHub", "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
+				} else {
+					return fmt.Errorf("pushing open fork PR branch to github: %v", err)
+				}
+			}
+
+			giteaPullRequest.Head.Ref = sourceBranchForClosedOrOpenForkPullRequest
+
+			if tmpEmptyCommitRequired {
+				// open PRs from forks that have zero commits will auto-closed on GitHub, so the source branch can be deleted.
+				cleanUpBranch = true
+			}
+		}
+
 		if tmpEmptyCommitRequired {
 			entry.Logger.Trace("checkout source branch for empty commit list pull request", "repository_id", entry.GiteaRepository.ID, "pr_number", giteaPullRequest.Index)
 			if err = worktree.Checkout(&git.CheckoutOptions{
 				Create: h.Conditional(giteaPullRequest.State == gitea.StateOpen, false, true),
 				Force:  true,
-				Branch: plumbing.NewBranchReferenceName(h.Conditional(giteaPullRequest.State == gitea.StateClosed, sourceBranchForClosedPullRequest, giteaPullRequest.Head.Ref)),
+				Branch: plumbing.NewBranchReferenceName(h.Conditional(giteaPullRequest.State == gitea.StateClosed, sourceBranchForClosedOrOpenForkPullRequest, giteaPullRequest.Head.Ref)),
 			}); err != nil {
 				return fmt.Errorf("checking out temporary empty commit list source branch for pull request #%d: %v", giteaPullRequest.Index, err)
 			}
@@ -801,7 +839,7 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 			entry.Logger.Trace("searching for existing branch for closed/merged pull request", "repository_id", entry.GiteaRepository.ID, "pr_number", giteaPullRequest.Index, "source_branch", giteaPullRequest.Head.Ref)
 
 			// Generate temporary branch names
-			giteaPullRequest.Head.Ref = sourceBranchForClosedPullRequest
+			giteaPullRequest.Head.Ref = sourceBranchForClosedOrOpenForkPullRequest
 			giteaPullRequest.Base.Ref = targetBranchForClosedPullRequest
 
 			entry.Logger.Trace("creating target branch for merged/closed pull request", "repository_id", entry.GiteaRepository.ID, "pr_number", giteaPullRequest.Index, "branch", giteaPullRequest.Base.Ref, "sha", mergeBaseCommit.Hash)
@@ -1029,14 +1067,23 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 	}
 
 	if cleanUpBranch {
-		entry.Logger.Debug("deleting temporary branches for closed pull request", "pr_number", githubPullRequest.GetNumber(), "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
-		if err = entry.GitRepo.PushContext(ctx, &git.PushOptions{
-			RemoteName: "github",
-			RefSpecs: []config.RefSpec{
+		var refSpec []config.RefSpec
+		if isOpenForkPR && tmpEmptyCommitRequired {
+			entry.Logger.Debug("deleting temporary source branch for open fork PR with empty commit list", "pr_number", githubPullRequest.GetNumber(), "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
+			refSpec = []config.RefSpec{
+				config.RefSpec(fmt.Sprintf(":refs/heads/%s", giteaPullRequest.Head.Ref)),
+			}
+		} else {
+			entry.Logger.Debug("deleting temporary branches for closed pull request", "pr_number", githubPullRequest.GetNumber(), "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
+			refSpec = []config.RefSpec{
 				config.RefSpec(fmt.Sprintf(":refs/heads/%s", giteaPullRequest.Head.Ref)),
 				config.RefSpec(fmt.Sprintf(":refs/heads/%s", giteaPullRequest.Base.Ref)),
-			},
-			Force: true,
+			}
+		}
+		if err = entry.GitRepo.PushContext(ctx, &git.PushOptions{
+			RemoteName: "github",
+			RefSpecs:   refSpec,
+			Force:      true,
 		}); err != nil {
 			if errors.Is(err, git.NoErrAlreadyUpToDate) {
 				entry.Logger.Trace("branches already deleted on GitHub", "pr_number", githubPullRequest.GetNumber(), "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
