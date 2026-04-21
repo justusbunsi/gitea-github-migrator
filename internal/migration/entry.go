@@ -11,19 +11,19 @@ import (
 )
 
 type Entry struct {
-	GiteaOwner      string
-	GiteaRepo       string
-	GitHubOwner     string
-	GitHubRepo      string
-	Logger          hclog.Logger
+	GiteaOwner        string
+	GiteaRepo         string
+	GitHubOwner       string
+	GitHubRepo        string
+	Logger            hclog.Logger
 	PRSuccessCount    int
 	PRFailureCount    int
 	IssueSuccessCount int
 	IssueFailureCount int
-	GiteaRepository *gitea.Repository
-	GitRepo         *git.Repository
-	giteaClient     *gitea.Client
-	githubClient    *github.Client
+	GiteaRepository   *gitea.Repository
+	GitRepo           *git.Repository
+	giteaClient       *gitea.Client
+	githubClient      *github.Client
 }
 
 func NewEntry(giteaSlug, githubSlug string, giteaClient *gitea.Client, githubClient *github.Client, logger hclog.Logger) (*Entry, error) {
@@ -57,4 +57,8 @@ func NewEntry(giteaSlug, githubSlug string, giteaClient *gitea.Client, githubCli
 	}
 
 	return e, nil
+}
+
+func (e *Entry) GetCacheID() string {
+	return fmt.Sprintf("%s/%s,%s/%s", e.GiteaOwner, e.GiteaRepo, e.GitHubOwner, e.GitHubRepo)
 }

@@ -63,7 +63,14 @@ Written in Go, this is a cross-platform CLI utility that accepts the following r
   -rename-trunk-branch string
         specifies the new trunk branch name (incompatible with -rename-master-to-main)
   -report
-        report on primitives to be migrated instead of beginning migration```
+        report on primitives to be migrated instead of beginning migration
+  -cache-file string
+        The cache file allows non-loop runs to resume after an unhandled error efficiently.
+        Without it a resume still works correctly - the GitHub Search API identifies what
+        already exists - but each already-migrated item costs a search request. On large
+        repositories this exhausts the primary rate limit before the actual resume point is
+        even reached. The cache stores that point directly, skipping the searches entirely.
+```
 
 Use the `-github-user` argument to specify the GitHub username for whom the authentication token was issued (mandatory). You can also specify this with the `GITHUB_USER` environment variable.
 

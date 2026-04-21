@@ -37,7 +37,7 @@ import (
 
 var loop, report bool
 var deleteExistingRepos, enablePullRequests, enableIssues, renameMasterToMain bool
-var githubDomain, githubRepo, githubToken, githubUser, giteaDomain, giteaProject, giteaToken, projectsCsvPath, renameTrunkBranch string
+var githubDomain, githubRepo, githubToken, githubUser, giteaDomain, giteaProject, giteaToken, projectsCsvPath, renameTrunkBranch, cacheFilePath string
 
 var (
 	cache          *objectCache
@@ -121,6 +121,7 @@ func main() {
 	flag.StringVar(&renameTrunkBranch, "rename-trunk-branch", "", "specifies the new trunk branch name (incompatible with -rename-master-to-main)")
 
 	flag.IntVar(&maxConcurrency, "max-concurrency", 4, "how many projects to migrate in parallel")
+	flag.StringVar(&cacheFilePath, "cache-file", "", "path to a JSON file for persisting the cache across runs (enables faster and cheaper resumability)")
 
 	flag.Parse()
 
@@ -146,6 +147,13 @@ func main() {
 	if renameMasterToMain && renameTrunkBranch != "" {
 		logger.Error("cannot specify -rename-master-to-main and -rename-trunk-branch together")
 		os.Exit(1)
+	}
+
+	if cacheFilePath != "" {
+		if err := cache.loadFromFile(cacheFilePath); err != nil {
+			logger.Error("failed to load cache file", "path", cacheFilePath, "error", err)
+			os.Exit(1)
+		}
 	}
 
 	transport := &gitHubAdvancedSearchModder{
@@ -191,8 +199,15 @@ func main() {
 	if report {
 		printReport(ctx, projects)
 	} else {
-		if err = performMigration(ctx, projects); err != nil {
-			sendErr(err)
+		migrationErr := performMigration(ctx, projects)
+		if cacheFilePath != "" {
+			if err := cache.saveToFile(cacheFilePath); err != nil {
+				logger.Error("failed to save cache file", "path", cacheFilePath, "error", err)
+				os.Exit(1)
+			}
+		}
+		if migrationErr != nil {
+			sendErr(migrationErr)
 			os.Exit(1)
 		} else if errCount > 0 {
 			logger.Warn(fmt.Sprintf("encountered %d errors during migration, review log output for details", errCount))
@@ -360,9 +375,36 @@ func migrateProject(ctx context.Context, proj []string) error {
 		if _, err = gh.Repositories.Delete(ctx, entry.GitHubOwner, entry.GitHubRepo); err != nil {
 			return fmt.Errorf("deleting existing github repo: %v", err)
 		}
-
+		cache.purgeRepo(entry.GetCacheID())
 		createRepo = true
 		repoDeleted = true
+	}
+
+	// The cache file allows non-loop runs to resume after an unhandled error efficiently.
+	// Without it a resume still works correctly — the GitHub Search API identifies what
+	// already exists — but each already-migrated item costs a search request. On large
+	// repositories this exhausts the primary rate limit before the actual resume point is
+	// even reached. The cache stores that point directly, skipping the searches entirely.
+	//
+	// repoKnownInCache controls whether the cache is trustworthy for this repository.
+	// It is only true when a cache file is in use AND the repo has entries in it, meaning a
+	// previous cache-backed run already started migrating it. This is the prerequisite for
+	// skipping the GitHub search on resume: items that were completed are skipped entirely;
+	// items that previously failed still trigger a search to avoid duplicates.
+	//
+	// Scenario A – no cache file: githubLookupRequired always reflects the createRepo flag
+	// (new repo → no search needed; existing repo → search to avoid duplicates).
+	// Scenario B – cache file, repo is known: completed items are skipped; failed items search;
+	// new items skip the search because the cache is a complete source of truth from run 1.
+	// Scenario C – cache file, repo is NOT known (cache from a different run or wrong file):
+	// refused with an error so the user does not silently create duplicates.
+	repoKnownInCache := cacheFilePath != "" && cache.isKnownRepo(entry.GetCacheID())
+	githubLookupRequired := func(index int64) bool {
+		return !createRepo && (!repoKnownInCache || cache.isFailed(entry.GetCacheID(), index))
+	}
+
+	if cacheFilePath != "" && !createRepo && !repoKnownInCache {
+		return fmt.Errorf("repository %s/%s already exists on GitHub but is not tracked in cache; use -delete-existing-repos to recreate it or provide a cache file from a previous run of this repository or do not use -cache-file entirely", entry.GitHubOwner, entry.GitHubRepo)
 	}
 
 	defaultBranch := "main"
@@ -550,8 +592,9 @@ func migrateProject(ctx context.Context, proj []string) error {
 					// fail-fast
 					break
 				}
-				err = migratePullRequest(ctx, entry, defaultBranch, createRepo, giteaPullRequests[idx])
+				err = migratePullRequest(ctx, entry, defaultBranch, githubLookupRequired(giteaPullRequests[idx].Index), giteaPullRequests[idx])
 				if err != nil {
+					cache.markFailed(entry.GetCacheID(), giteaPullRequests[idx].Index)
 					sendErr(err)
 					entry.PRFailureCount++
 					// fail-fast
@@ -559,8 +602,9 @@ func migrateProject(ctx context.Context, proj []string) error {
 					break
 				}
 			} else {
-				err = migrateIssue(ctx, entry, createRepo, giteaItem)
+				err = migrateIssue(ctx, entry, githubLookupRequired(giteaItem.Index), giteaItem)
 				if err != nil {
+					cache.markFailed(entry.GetCacheID(), giteaItem.Index)
 					sendErr(err)
 					entry.IssueFailureCount++
 					// fail-fast
@@ -592,8 +636,9 @@ func migrateProject(ctx context.Context, proj []string) error {
 					break
 				}
 
-				err = migrateIssue(ctx, entry, createRepo, giteaIssue)
+				err = migrateIssue(ctx, entry, githubLookupRequired(giteaIssue.Index), giteaIssue)
 				if err != nil {
+					cache.markFailed(entry.GetCacheID(), giteaIssue.Index)
 					sendErr(err)
 					entry.IssueFailureCount++
 				}
@@ -621,8 +666,9 @@ func migrateProject(ctx context.Context, proj []string) error {
 					break
 				}
 
-				err = migratePullRequest(ctx, entry, defaultBranch, createRepo, giteaPullRequest)
+				err = migratePullRequest(ctx, entry, defaultBranch, githubLookupRequired(giteaPullRequest.Index), giteaPullRequest)
 				if err != nil {
+					cache.markFailed(entry.GetCacheID(), giteaPullRequest.Index)
 					sendErr(err)
 					entry.PRFailureCount++
 				}
@@ -636,7 +682,12 @@ func migrateProject(ctx context.Context, proj []string) error {
 	return nil
 }
 
-func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBranch string, initialMigration bool, giteaPullRequest *gitea.PullRequest) error {
+func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBranch string, githubLookupRequired bool, giteaPullRequest *gitea.PullRequest) error {
+	if cache.isCompleted(entry.GetCacheID(), giteaPullRequest.Index) {
+		entry.Logger.Debug("skipping already completed pull request", "pr_number", giteaPullRequest.Index)
+		return nil
+	}
+
 	if giteaPullRequest.MergeBase == "" {
 		return fmt.Errorf("identifying suitable merge base for pull request %d", giteaPullRequest.Index)
 	}
@@ -665,7 +716,7 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 		tmpEmptyCommitRequired = true
 	}
 
-	if !initialMigration {
+	if githubLookupRequired {
 		entry.Logger.Debug("searching for any existing pull request", "pr_number", giteaPullRequest.Index)
 		sourceBranches := []string{giteaPullRequest.Head.Ref, sourceBranchForClosedOrOpenForkPullRequest}
 		branchQuery := fmt.Sprintf("head:%s", strings.Join(sourceBranches, " OR head:"))
@@ -1097,15 +1148,21 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 	if err != nil {
 		return fmt.Errorf("migrating comments: %v", err)
 	}
+	cache.markCompleted(entry.GetCacheID(), giteaPullRequest.Index)
 	entry.PRSuccessCount++
 
 	return nil
 }
 
-func migrateIssue(ctx context.Context, entry *migration.Entry, initialMigration bool, giteaIssue *gitea.Issue) error {
+func migrateIssue(ctx context.Context, entry *migration.Entry, githubLookupRequired bool, giteaIssue *gitea.Issue) error {
+	if cache.isCompleted(entry.GetCacheID(), giteaIssue.Index) {
+		entry.Logger.Debug("skipping already completed issue", "issue_number", giteaIssue.Index)
+		return nil
+	}
+
 	var githubIssue *github.Issue
 
-	if !initialMigration {
+	if githubLookupRequired {
 		entry.Logger.Debug("searching for any existing issue", "issue_number", giteaIssue.Index)
 		query := fmt.Sprintf("repo:%s/%s AND is:issue AND \"Gitea Issue Number\" \"[%d]\" in:body", entry.GitHubOwner, entry.GitHubRepo, giteaIssue.Index)
 		searchResult, err := getGithubSearchResults(ctx, query)
@@ -1231,6 +1288,7 @@ func migrateIssue(ctx context.Context, entry *migration.Entry, initialMigration 
 
 	if giteaIssue.Poster.UserName == constants.PhantomItemPoster && giteaIssue.Title == constants.PhantomItemTitle && giteaIssue.Body == constants.PhantomItemBody {
 		// phantom items don't exist and therefore have no comments - early exit
+		cache.markCompleted(entry.GetCacheID(), giteaIssue.Index)
 		entry.IssueSuccessCount++
 		return nil
 	}
@@ -1240,6 +1298,7 @@ func migrateIssue(ctx context.Context, entry *migration.Entry, initialMigration 
 		return err
 	}
 
+	cache.markCompleted(entry.GetCacheID(), giteaIssue.Index)
 	entry.IssueSuccessCount++
 	return nil
 }
