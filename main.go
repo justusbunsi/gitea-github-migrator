@@ -559,6 +559,7 @@ func migrateProject(ctx context.Context, proj []string) error {
 					},
 					Title: constants.PhantomItemTitle,
 					Body:  constants.PhantomItemBody,
+					State: gitea.StateClosed,
 				})
 				phantomItemsCount++
 			}
@@ -1194,7 +1195,9 @@ func migrateIssue(ctx context.Context, entry *migration.Entry, githubLookupRequi
 	}
 
 	originalState := ""
-	if giteaIssue.State == gitea.StateClosed {
+	if giteaIssue.Poster.UserName == constants.PhantomItemPoster && giteaIssue.Title == constants.PhantomItemTitle && giteaIssue.Body == constants.PhantomItemBody {
+		originalState = "> This issue does not exist on Gitea. It was created to fill a gap in issue/PR ID list."
+	} else if giteaIssue.State == gitea.StateClosed {
 		originalState = "> This issue was originally **closed** on Gitea"
 	}
 
