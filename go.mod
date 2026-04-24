@@ -12,6 +12,7 @@ require (
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/go-retryablehttp v0.7.8
 	github.com/jferrl/go-githubauth v1.6.0
+	github.com/justusbunsi/progress-bar v1.0.2
 	golang.org/x/oauth2 v0.36.0
 )
 
@@ -42,6 +43,6 @@ require (
 	github.com/xanzy/ssh-agent v0.3.3 // indirect
 	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/net v0.50.0 // indirect
-	golang.org/x/sys v0.41.0 // indirect
+	golang.org/x/sys v0.43.0 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 )

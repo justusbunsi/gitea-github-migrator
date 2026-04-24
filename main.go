@@ -28,6 +28,7 @@ import (
 	"github.com/go-git/go-git/v5/storage/memory"
 	"github.com/google/go-github/v74/github"
 	"github.com/hashicorp/go-hclog"
+	"github.com/justusbunsi/progress-bar/progressbar"
 	"github.com/justusbunsi/gitea-github-migrator/internal/constants"
 	"github.com/justusbunsi/gitea-github-migrator/internal/github_client"
 	h "github.com/justusbunsi/gitea-github-migrator/internal/helpers"
@@ -50,7 +51,36 @@ var (
 	maxConcurrency    int
 	getGithubGitToken func() (string, error)
 	gitAuth           *dynamicGitAuth
+	logWriter         = &barAwareLogWriter{}
 )
+
+// barAwareLogWriter is an io.Writer for hclog that routes log lines through
+// the active MultiBar's Println so bars are redrawn after each log line.
+// When no MultiBar is active it falls back to stderr directly.
+type barAwareLogWriter struct {
+	mu sync.Mutex
+	mb *progressbar.MultiBar
+}
+
+func (w *barAwareLogWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	mb := w.mb
+	w.mu.Unlock()
+	if mb == nil {
+		return os.Stderr.Write(p)
+	}
+	s := strings.TrimRight(string(p), "\n")
+	if s != "" {
+		mb.Println(s)
+	}
+	return len(p), nil
+}
+
+func (w *barAwareLogWriter) setMultiBar(mb *progressbar.MultiBar) {
+	w.mu.Lock()
+	w.mb = mb
+	w.mu.Unlock()
+}
 
 // dynamicGitAuth implements go-git's HTTP AuthMethod interface and fetches a
 // fresh token on every request, ensuring pushes survive token expiry during
@@ -129,8 +159,9 @@ func main() {
 	}()
 
 	logger = hclog.New(&hclog.LoggerOptions{
-		Name:  "gitea-github-migrator",
-		Level: hclog.LevelFromString(os.Getenv("LOG_LEVEL")),
+		Name:   "gitea-github-migrator",
+		Level:  hclog.LevelFromString(os.Getenv("LOG_LEVEL")),
+		Output: logWriter,
 	})
 
 	cache = newObjectCache()
@@ -346,6 +377,14 @@ func performMigration(ctx context.Context, projects []Project) error {
 	var wg sync.WaitGroup
 	queue := make(chan Project, concurrency*2)
 
+	var mb *progressbar.MultiBar
+	if !loop {
+		mb = progressbar.NewMultiBar()
+		logWriter.setMultiBar(mb)
+		defer logWriter.setMultiBar(nil)
+		defer mb.CleanUp()
+	}
+
 	for i := 0; i < concurrency; i++ {
 		wg.Add(1)
 
@@ -357,7 +396,13 @@ func performMigration(ctx context.Context, projects []Project) error {
 					break
 				}
 
-				if err := migrateProject(ctx, proj); err != nil {
+				var bar *progressbar.Bar
+				if mb != nil {
+					bar = mb.NewBar(proj[0], 1)
+					bar.Set(0)
+				}
+
+				if err := migrateProject(ctx, proj, bar); err != nil {
 					sendErr(err)
 				}
 			}
@@ -393,7 +438,7 @@ func performMigration(ctx context.Context, projects []Project) error {
 	return nil
 }
 
-func migrateProject(ctx context.Context, proj []string) error {
+func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) error {
 	entry, err := migration.NewEntry(proj[0], proj[1], gi, gh, logger)
 	if err != nil {
 		return err
@@ -593,6 +638,13 @@ func migrateProject(ctx context.Context, proj []string) error {
 		return fmt.Errorf("setting default branch: %v", err)
 	}
 
+	if !enableIssues && !enablePullRequests {
+		if bar != nil {
+			bar.Set(1)
+		}
+		return nil
+	}
+
 	if enableIssues && enablePullRequests {
 		giteaItems, totalCount, err := entry.GetAllGiteaIssues(ctx, gitea.IssueTypeAll, false)
 		if err != nil {
@@ -627,6 +679,9 @@ func migrateProject(ctx context.Context, proj []string) error {
 			nextExpected = issue.Index + 1
 		}
 		giteaItems = filled
+		if bar != nil {
+			bar.Total = uint16(len(giteaItems))
+		}
 
 		entry.Logger.Info("migrating issues and pull requests from Gitea to GitHub", "issues", totalCount-prTotalCount, "pull_requests", prTotalCount, "phantom_items", phantomItemsCount)
 
@@ -673,6 +728,9 @@ func migrateProject(ctx context.Context, proj []string) error {
 					break
 				}
 			}
+			if bar != nil {
+				bar.Inc()
+			}
 		}
 
 		issueSkipped := totalCount + phantomItemsCount - prTotalCount - entry.IssueSuccessCount - entry.IssueFailureCount
@@ -687,6 +745,9 @@ func migrateProject(ctx context.Context, proj []string) error {
 			}
 
 			entry.Logger.Info("migrating issues from Gitea to GitHub", "count", totalCount)
+			if bar != nil {
+				bar.Total = uint16(len(giteaIssues))
+			}
 			for _, giteaIssue := range giteaIssues {
 				if giteaIssue == nil {
 					continue
@@ -703,6 +764,9 @@ func migrateProject(ctx context.Context, proj []string) error {
 					sendErr(err)
 					entry.IssueFailureCount++
 				}
+				if bar != nil {
+					bar.Inc()
+				}
 			}
 
 			skippedCount := totalCount - entry.IssueSuccessCount - entry.IssueFailureCount
@@ -716,6 +780,9 @@ func migrateProject(ctx context.Context, proj []string) error {
 			}
 
 			entry.Logger.Info("migrating pull requests from Gitea to GitHub", "count", totalCount)
+			if bar != nil {
+				bar.Total = uint16(len(giteaPullRequests))
+			}
 			for _, giteaPullRequest := range giteaPullRequests {
 				if giteaPullRequest == nil {
 					continue
@@ -732,6 +799,9 @@ func migrateProject(ctx context.Context, proj []string) error {
 					cache.markFailed(entry.GetCacheID(), giteaPullRequest.Index)
 					sendErr(err)
 					entry.PRFailureCount++
+				}
+				if bar != nil {
+					bar.Inc()
 				}
 			}
 
