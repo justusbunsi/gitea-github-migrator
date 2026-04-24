@@ -31,6 +31,7 @@ import (
 	"github.com/justusbunsi/gitea-github-migrator/internal/github_client"
 	h "github.com/justusbunsi/gitea-github-migrator/internal/helpers"
 	"github.com/justusbunsi/gitea-github-migrator/internal/migration"
+	"github.com/justusbunsi/gitea-github-migrator/internal/retry_client"
 )
 
 var loop, report bool
@@ -209,7 +210,7 @@ func main() {
 	gitAuth = &dynamicGitAuth{tokenFunc: getGithubGitToken, logger: logger}
 
 	giteaUrl := fmt.Sprintf("https://%s", giteaDomain)
-	if gi, err = gitea.NewClient(giteaUrl, gitea.SetToken(giteaToken)); err != nil {
+	if gi, err = gitea.NewClient(giteaUrl, gitea.SetToken(giteaToken), gitea.SetHTTPClient(retry_client.New(logger).StandardClient())); err != nil {
 		sendErr(err)
 		os.Exit(1)
 	}
