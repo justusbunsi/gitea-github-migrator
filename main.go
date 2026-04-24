@@ -81,7 +81,11 @@ func pushWithRetry(ctx context.Context, repo *git.Repository, opts *git.PushOpti
 		}
 		if attempt < 2 {
 			log.Warn("git push authentication failed, retrying", "attempt", attempt+1, "error", err)
-			time.Sleep(2 * time.Second)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(2 * time.Second):
+			}
 		}
 	}
 	return err
@@ -220,14 +224,14 @@ func main() {
 	} else {
 		ghCfg.Token = githubToken
 	}
-	if gh, getGithubGitToken, err = github_client.New(ghCfg, logger); err != nil {
+	if gh, getGithubGitToken, err = github_client.New(ctx, ghCfg, logger); err != nil {
 		sendErr(err)
 		os.Exit(1)
 	}
 	gitAuth = &dynamicGitAuth{tokenFunc: getGithubGitToken, logger: logger}
 
 	giteaUrl := fmt.Sprintf("https://%s", giteaDomain)
-	if gi, err = gitea.NewClient(giteaUrl, gitea.SetToken(giteaToken), gitea.SetHTTPClient(retry_client.New(logger).StandardClient())); err != nil {
+	if gi, err = gitea.NewClient(giteaUrl, gitea.SetToken(giteaToken), gitea.SetHTTPClient(retry_client.New(logger).StandardClient()), gitea.SetContext(ctx)); err != nil {
 		sendErr(err)
 		os.Exit(1)
 	}
@@ -1078,7 +1082,9 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 		if githubPullRequest, _, err = gh.PullRequests.Create(ctx, entry.GitHubOwner, entry.GitHubRepo, &newPullRequest); err != nil {
 			return fmt.Errorf("creating pull request: %v", err)
 		}
-		time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
+		if err := h.SleepWithContext(ctx, constants.GithubApiPauseBetweenMutativeRequests); err != nil {
+			return err
+		}
 
 		if tmpEmptyCommitRequired {
 			entry.Logger.Debug("reset empty commit list pull request branch to actual commit", "pr_number", giteaPullRequest.Index, "source_branch", giteaPullRequest.Head.Ref, "actual_commit", prHeadRef)
@@ -1114,7 +1120,9 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 			if githubPullRequest, _, err = gh.PullRequests.Edit(ctx, entry.GitHubOwner, entry.GitHubRepo, githubPullRequest.GetNumber(), githubPullRequest); err != nil {
 				return fmt.Errorf("updating pull request: %v", err)
 			}
-			time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
+			if err := h.SleepWithContext(ctx, constants.GithubApiPauseBetweenMutativeRequests); err != nil {
+				return err
+			}
 
 			entry.Logger.Debug("creating empty commit list auto-close comment", "pr_number", giteaPullRequest.Index)
 			newComment := github.IssueComment{
@@ -1125,7 +1133,9 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 			if _, _, err = gh.Issues.CreateComment(ctx, entry.GitHubOwner, entry.GitHubRepo, githubPullRequest.GetNumber(), &newComment); err != nil {
 				return fmt.Errorf("creating empty commit list auto-close comment: %v", err)
 			}
-			time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
+			if err := h.SleepWithContext(ctx, constants.GithubApiPauseBetweenMutativeRequests); err != nil {
+				return err
+			}
 		}
 
 		if giteaPullRequest.State == gitea.StateClosed {
@@ -1135,7 +1145,9 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 			if githubPullRequest, _, err = gh.PullRequests.Edit(ctx, entry.GitHubOwner, entry.GitHubRepo, githubPullRequest.GetNumber(), githubPullRequest); err != nil {
 				return fmt.Errorf("updating pull request: %v", err)
 			}
-			time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
+			if err := h.SleepWithContext(ctx, constants.GithubApiPauseBetweenMutativeRequests); err != nil {
+				return err
+			}
 		}
 
 	} else {
@@ -1156,7 +1168,9 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 			if githubPullRequest, _, err = gh.PullRequests.Edit(ctx, entry.GitHubOwner, entry.GitHubRepo, pullRequestState.GetNumber(), pullRequestState); err != nil {
 				return fmt.Errorf("updating pull request state: %v", err)
 			}
-			time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
+			if err := h.SleepWithContext(ctx, constants.GithubApiPauseBetweenMutativeRequests); err != nil {
+				return err
+			}
 		}
 
 		if (newState != nil && (githubPullRequest.State == nil || *githubPullRequest.State != *newState)) ||
@@ -1172,7 +1186,9 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 			if githubPullRequest, _, err = gh.PullRequests.Edit(ctx, entry.GitHubOwner, entry.GitHubRepo, githubPullRequest.GetNumber(), githubPullRequest); err != nil {
 				return fmt.Errorf("updating pull request: %v", err)
 			}
-			time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
+			if err := h.SleepWithContext(ctx, constants.GithubApiPauseBetweenMutativeRequests); err != nil {
+				return err
+			}
 		} else {
 			entry.Logger.Trace("existing pull request is up-to-date", "pr_number", githubPullRequest.GetNumber())
 		}
@@ -1310,14 +1326,18 @@ func migrateIssue(ctx context.Context, entry *migration.Entry, githubLookupRequi
 			return fmt.Errorf("creating issue: %v", err)
 		}
 		githubIssue = createdIssue
-		time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
+		if err := h.SleepWithContext(ctx, constants.GithubApiPauseBetweenMutativeRequests); err != nil {
+			return err
+		}
 
 		if giteaIssue.State == gitea.StateClosed {
 			entry.Logger.Debug("closing issue", "issue_number", githubIssue.GetNumber())
 			if _, _, err = gh.Issues.Edit(ctx, entry.GitHubOwner, entry.GitHubRepo, githubIssue.GetNumber(), &github.IssueRequest{State: h.Pointer("closed")}); err != nil {
 				return fmt.Errorf("closing issue: %v", err)
 			}
-			time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
+			if err := h.SleepWithContext(ctx, constants.GithubApiPauseBetweenMutativeRequests); err != nil {
+				return err
+			}
 		}
 	} else {
 		var newState *string
@@ -1332,7 +1352,9 @@ func migrateIssue(ctx context.Context, entry *migration.Entry, githubLookupRequi
 			if _, _, err := gh.Issues.Edit(ctx, entry.GitHubOwner, entry.GitHubRepo, githubIssue.GetNumber(), &github.IssueRequest{State: newState}); err != nil {
 				return fmt.Errorf("updating issue state: %v", err)
 			}
-			time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
+			if err := h.SleepWithContext(ctx, constants.GithubApiPauseBetweenMutativeRequests); err != nil {
+				return err
+			}
 		}
 
 		if (githubIssue.Title == nil || *githubIssue.Title != giteaIssue.Title) ||
@@ -1344,7 +1366,9 @@ func migrateIssue(ctx context.Context, entry *migration.Entry, githubLookupRequi
 			}); err != nil {
 				return fmt.Errorf("updating issue: %v", err)
 			}
-			time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
+			if err := h.SleepWithContext(ctx, constants.GithubApiPauseBetweenMutativeRequests); err != nil {
+				return err
+			}
 		} else {
 			entry.Logger.Trace("existing issue is up-to-date", "issue_number", githubIssue.GetNumber())
 		}

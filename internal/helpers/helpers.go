@@ -1,13 +1,24 @@
 package helpers
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"code.gitea.io/sdk/gitea"
 	"github.com/justusbunsi/gitea-github-migrator/internal/constants"
 )
+
+func SleepWithContext(ctx context.Context, d time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(d):
+		return nil
+	}
+}
 
 func Pointer[T any](v T) *T {
 	return &v

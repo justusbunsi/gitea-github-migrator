@@ -1,6 +1,7 @@
 package github_client
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"time"
@@ -44,6 +45,7 @@ func (s *searchModder) RoundTrip(req *http.Request) (*http.Response, error) {
 type retryingTokenSource struct {
 	base   oauth2.TokenSource
 	logger hclog.Logger
+	ctx    context.Context
 }
 
 func (r *retryingTokenSource) Token() (*oauth2.Token, error) {
@@ -56,7 +58,11 @@ func (r *retryingTokenSource) Token() (*oauth2.Token, error) {
 		}
 		if attempt < 2 {
 			r.logger.Warn("token renewal failed, retrying", "attempt", attempt+1, "error", err)
-			time.Sleep(backoff)
+			select {
+			case <-r.ctx.Done():
+				return nil, r.ctx.Err()
+			case <-time.After(backoff):
+			}
 			backoff *= 2
 		}
 	}
@@ -66,7 +72,7 @@ func (r *retryingTokenSource) Token() (*oauth2.Token, error) {
 // New creates a GitHub API client and returns a token getter for git operations.
 // The token getter always returns a valid, possibly refreshed bearer token so it
 // is safe to call immediately before a git push rather than caching the result.
-func New(cfg Config, logger hclog.Logger) (*github.Client, func() (string, error), error) {
+func New(ctx context.Context, cfg Config, logger hclog.Logger) (*github.Client, func() (string, error), error) {
 	retryClient := retry_client.New(logger)
 
 	var tokenFunc func() (string, error)
@@ -83,7 +89,7 @@ func New(cfg Config, logger hclog.Logger) (*github.Client, func() (string, error
 			opts = append(opts, githubauth.WithEnterpriseURL(fmt.Sprintf("https://%s", cfg.Domain)))
 		}
 		tokenSource := githubauth.NewInstallationTokenSource(cfg.AppInstallationID, appTokenSource, opts...)
-		wrapped := &retryingTokenSource{base: tokenSource, logger: logger}
+		wrapped := &retryingTokenSource{base: tokenSource, logger: logger, ctx: ctx}
 		// Inject oauth2.Transport inside the retry loop so each retry attempt gets a
 		// fresh token — critical when a rate-limit cooldown outlasts the token lifetime.
 		retryClient.HTTPClient.Transport = &oauth2.Transport{

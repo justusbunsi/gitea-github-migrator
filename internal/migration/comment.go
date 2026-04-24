@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"code.gitea.io/sdk/gitea"
 	"github.com/google/go-github/v74/github"
@@ -100,7 +99,9 @@ func (e *Entry) MigrateComments(ctx context.Context, giteaItemId int64, githubIt
 						// TODO: think about whether to allow "!foundExistingComment" branch to create a new comment on error; previously loop-break instead of return
 						return fmt.Errorf("updating comments: %v", err)
 					}
-					time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
+					if err = h.SleepWithContext(ctx, constants.GithubApiPauseBetweenMutativeRequests); err != nil {
+						return err
+					}
 				}
 			} else {
 				e.Logger.Trace("existing comment is up-to-date", "gitea_item", giteaItemId, "github_item", githubItemId, "comment_id", comment.ID, "comment_id", githubComment.GetID())
@@ -115,7 +116,9 @@ func (e *Entry) MigrateComments(ctx context.Context, giteaItemId int64, githubIt
 			if _, _, err = e.githubClient.Issues.CreateComment(ctx, e.GitHubOwner, e.GitHubRepo, githubItemId, &newComment); err != nil {
 				return fmt.Errorf("creating comment for gitea item #%d (#%d): %v", giteaItemId, githubItemId, err)
 			}
-			time.Sleep(constants.GithubApiPauseBetweenMutativeRequests)
+			if err = h.SleepWithContext(ctx, constants.GithubApiPauseBetweenMutativeRequests); err != nil {
+				return err
+			}
 		}
 	}
 
