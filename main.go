@@ -219,7 +219,7 @@ func main() {
 	}
 
 	repoSpecifiedInline := githubRepo != "" && giteaProject != ""
-	if repoSpecifiedInline && projectsCsvPath != "" {
+	if (githubRepo != "" || giteaProject != "") && projectsCsvPath != "" {
 		logger.Error("cannot specify -projects-csv and either -github-repo or -gitea-project at the same time")
 		os.Exit(1)
 	}
@@ -231,6 +231,30 @@ func main() {
 	if renameMasterToMain && renameTrunkBranch != "" {
 		logger.Error("cannot specify -rename-master-to-main and -rename-trunk-branch together")
 		os.Exit(1)
+	}
+
+	if maxConcurrency <= 0 {
+		logger.Error("max-concurrency must be greater than 0")
+		os.Exit(1)
+	}
+
+	if deleteExistingRepos && cacheFilePath != "" {
+		logger.Error("cannot use -delete-existing-repos with -cache-file: the cache would be stale after repos are recreated")
+		os.Exit(1)
+	}
+
+	if deleteExistingRepos && loop {
+		logger.Error("cannot use -delete-existing-repos with -loop: repos would be deleted and recreated on every iteration")
+		os.Exit(1)
+	}
+
+	if report {
+		if loop {
+			logger.Info("ignoring -loop in report mode")
+		}
+		if deleteExistingRepos || enableIssues || enablePullRequests {
+			logger.Info("ignoring migration flags in report mode", "delete-existing-repos", deleteExistingRepos, "migrate-issues", enableIssues, "migrate-pull-requests", enablePullRequests)
+		}
 	}
 
 	if cacheFilePath != "" {
