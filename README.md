@@ -70,6 +70,12 @@ Written in Go, this is a cross-platform CLI utility that accepts the following r
         already exists - but each already-migrated item costs a search request. On large
         repositories this exhausts the primary rate limit before the actual resume point is
         even reached. The cache stores that point directly, skipping the searches entirely.
+  -github-app-id string
+        GitHub App ID for app-based authentication (alternative to GITHUB_TOKEN)
+  -github-app-installation-id int
+        GitHub App installation ID (see https://docs.github.com/en/apps/using-github-apps/installing-a-github-app-from-a-third-party)
+  -github-app-private-key string
+        path to the GitHub App private key PEM file (see https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/managing-private-keys-for-github-apps)
 ```
 
 Use the `-github-user` argument to specify the GitHub username for whom the authentication token was issued (mandatory). You can also specify this with the `GITHUB_USER` environment variable.
@@ -82,7 +88,10 @@ Alternatively, you can supply the path to a CSV file with the `-projects-csv` ar
 gitea-org-or-user/gitea-project-name,github-org-or-user/github-repo-name
 ```
 
-For authentication, the `GITEA_TOKEN` and `GITHUB_TOKEN` environment variables must be populated. You cannot specify tokens as command-line arguments.
+For authentication, the `GITEA_TOKEN` environment variable must always be populated. For GitHub authentication, one of the following must be provided:
+
+- **Personal Access Token**: set the `GITHUB_TOKEN` environment variable. You cannot specify tokens as command-line arguments.
+- **GitHub App**: specify `-github-app-id`, `-github-app-installation-id`, and `-github-app-private-key` together. All three flags are required when using app-based authentication. Installation tokens are short-lived but refreshed automatically — no special handling is needed. The app must be installed on the target GitHub organization or user account and granted sufficient permissions (contents, pull requests, issues).
 
 To enable migration of Gitea pull requests to GitHub pull requests (including closed/merged ones!), specify `-migrate-pull-requests`.
 

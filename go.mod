@@ -1,6 +1,6 @@
 module github.com/justusbunsi/gitea-github-migrator
 
-go 1.24.0
+go 1.25.0
 
 require (
 	code.gitea.io/sdk/gitea v0.23.2
@@ -11,6 +11,8 @@ require (
 	github.com/hashicorp/go-cleanhttp v0.5.2
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/go-retryablehttp v0.7.8
+	github.com/jferrl/go-githubauth v1.6.0
+	golang.org/x/oauth2 v0.36.0
 )
 
 require (
@@ -25,6 +27,7 @@ require (
 	github.com/fatih/color v1.18.0 // indirect
 	github.com/go-fed/httpsig v1.1.0 // indirect
 	github.com/go-git/gcfg v1.5.1-0.20230307220236-3a3c6141e376 // indirect
+	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
 	github.com/google/go-querystring v1.2.0 // indirect
 	github.com/hashicorp/go-version v1.8.0 // indirect

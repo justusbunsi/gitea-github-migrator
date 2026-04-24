@@ -25,28 +25,49 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/storage/memory"
-	"github.com/gofri/go-github-pagination/githubpagination"
 	"github.com/google/go-github/v74/github"
 	"github.com/hashicorp/go-hclog"
-	"github.com/hashicorp/go-retryablehttp"
 	"github.com/justusbunsi/gitea-github-migrator/internal/constants"
+	"github.com/justusbunsi/gitea-github-migrator/internal/github_client"
 	h "github.com/justusbunsi/gitea-github-migrator/internal/helpers"
 	"github.com/justusbunsi/gitea-github-migrator/internal/migration"
-	"github.com/justusbunsi/gitea-github-migrator/internal/retry_client"
 )
 
 var loop, report bool
 var deleteExistingRepos, enablePullRequests, enableIssues, renameMasterToMain bool
 var githubDomain, githubRepo, githubToken, githubUser, giteaDomain, giteaProject, giteaToken, projectsCsvPath, renameTrunkBranch, cacheFilePath string
+var githubAppID, githubAppPrivateKeyFile string
+var githubAppInstallationID int64
 
 var (
-	cache          *objectCache
-	errCount       int
-	logger         hclog.Logger
-	gh             *github.Client
-	gi             *gitea.Client
-	maxConcurrency int
+	cache             *objectCache
+	errCount          int
+	logger            hclog.Logger
+	gh                *github.Client
+	gi                *gitea.Client
+	maxConcurrency    int
+	getGithubGitToken func() (string, error)
+	gitAuth           *dynamicGitAuth
 )
+
+// dynamicGitAuth implements go-git's HTTP AuthMethod interface and fetches a
+// fresh token on every request, ensuring pushes survive token expiry during
+// long-running rate-limit cooldowns.
+type dynamicGitAuth struct {
+	tokenFunc func() (string, error)
+	logger    hclog.Logger
+}
+
+func (d *dynamicGitAuth) Name() string   { return "dynamic-token" }
+func (d *dynamicGitAuth) String() string { return "dynamic-token" }
+func (d *dynamicGitAuth) SetAuth(r *http.Request) {
+	token, err := d.tokenFunc()
+	if err != nil {
+		d.logger.Error("failed to obtain GitHub token for git push; request will proceed unauthenticated", "error", err)
+		return
+	}
+	r.SetBasicAuth("x-access-token", token)
+}
 
 type Project = []string
 
@@ -92,12 +113,6 @@ func main() {
 
 	cache = newObjectCache()
 
-	githubToken = os.Getenv("GITHUB_TOKEN")
-	if githubToken == "" {
-		logger.Error("missing environment variable", "name", "GITHUB_TOKEN")
-		os.Exit(1)
-	}
-
 	giteaToken = os.Getenv("GITEA_TOKEN")
 	if giteaToken == "" {
 		logger.Error("missing environment variable", "name", "GITEA_TOKEN")
@@ -123,6 +138,10 @@ func main() {
 	flag.IntVar(&maxConcurrency, "max-concurrency", 4, "how many projects to migrate in parallel")
 	flag.StringVar(&cacheFilePath, "cache-file", "", "path to a JSON file for persisting the cache across runs (enables faster and cheaper resumability)")
 
+	flag.StringVar(&githubAppID, "github-app-id", "", "GitHub App ID for app-based authentication (alternative to GITHUB_TOKEN)")
+	flag.Int64Var(&githubAppInstallationID, "github-app-installation-id", 0, "GitHub App installation ID")
+	flag.StringVar(&githubAppPrivateKeyFile, "github-app-private-key", "", "path to the GitHub App private key PEM file")
+
 	flag.Parse()
 
 	if githubUser == "" {
@@ -131,6 +150,18 @@ func main() {
 
 	if githubUser == "" {
 		logger.Error("must specify GitHub user")
+		os.Exit(1)
+	}
+
+	githubToken = os.Getenv("GITHUB_TOKEN")
+	usingAppAuth := githubAppID != "" || githubAppInstallationID != 0 || githubAppPrivateKeyFile != ""
+	if usingAppAuth {
+		if githubAppID == "" || githubAppInstallationID == 0 || githubAppPrivateKeyFile == "" {
+			logger.Error("must specify all of -github-app-id, -github-app-installation-id, and -github-app-private-key together")
+			os.Exit(1)
+		}
+	} else if githubToken == "" {
+		logger.Error("must set GITHUB_TOKEN or provide all GitHub App authentication flags")
 		os.Exit(1)
 	}
 
@@ -156,20 +187,26 @@ func main() {
 		}
 	}
 
-	transport := &gitHubAdvancedSearchModder{
-		base: &retryablehttp.RoundTripper{Client: retry_client.New(logger)},
+	ghCfg := github_client.Config{
+		Domain: githubDomain,
 	}
-	client := githubpagination.NewClient(transport, githubpagination.WithPerPage(100))
-
-	if githubDomain == constants.DefaultGithubDomain {
-		gh = github.NewClient(client).WithAuthToken(githubToken)
-	} else {
-		githubUrl := fmt.Sprintf("https://%s", githubDomain)
-		if gh, err = github.NewClient(client).WithAuthToken(githubToken).WithEnterpriseURLs(githubUrl, githubUrl); err != nil {
-			sendErr(err)
+	if usingAppAuth {
+		privateKeyBytes, err := os.ReadFile(githubAppPrivateKeyFile)
+		if err != nil {
+			logger.Error("failed to read GitHub App private key", "path", githubAppPrivateKeyFile, "error", err)
 			os.Exit(1)
 		}
+		ghCfg.AppID = githubAppID
+		ghCfg.AppInstallationID = githubAppInstallationID
+		ghCfg.AppPrivateKey = privateKeyBytes
+	} else {
+		ghCfg.Token = githubToken
 	}
+	if gh, getGithubGitToken, err = github_client.New(ghCfg, logger); err != nil {
+		sendErr(err)
+		os.Exit(1)
+	}
+	gitAuth = &dynamicGitAuth{tokenFunc: getGithubGitToken, logger: logger}
 
 	giteaUrl := fmt.Sprintf("https://%s", giteaDomain)
 	if gi, err = gitea.NewClient(giteaUrl, gitea.SetToken(giteaToken)); err != nil {
@@ -488,12 +525,11 @@ func migrateProject(ctx context.Context, proj []string) error {
 	}
 
 	githubUrl := fmt.Sprintf("https://%s/%s/%s", githubDomain, entry.GitHubOwner, entry.GitHubRepo)
-	githubUrlWithCredentials := fmt.Sprintf("https://%s:%s@%s/%s/%s", githubUser, githubToken, githubDomain, entry.GitHubOwner, entry.GitHubRepo)
 
 	entry.Logger.Debug("adding remote for GitHub repository", "url", githubUrl)
 	if _, err = entry.GitRepo.CreateRemote(&config.RemoteConfig{
 		Name:   "github",
-		URLs:   []string{githubUrlWithCredentials},
+		URLs:   []string{githubUrl},
 		Mirror: true,
 	}); err != nil {
 		return fmt.Errorf("adding github remote: %v", err)
@@ -502,6 +538,7 @@ func migrateProject(ctx context.Context, proj []string) error {
 	entry.Logger.Debug("force-pushing to GitHub repository", "url", githubUrl)
 	if err = entry.GitRepo.PushContext(ctx, &git.PushOptions{
 		RemoteName: "github",
+		Auth:       gitAuth,
 		Force:      true,
 		//Prune:      true, // causes error, attempts to delete main branch
 	}); err != nil {
@@ -515,6 +552,7 @@ func migrateProject(ctx context.Context, proj []string) error {
 	entry.Logger.Debug("pushing tags to GitHub repository", "url", githubUrl)
 	if err = entry.GitRepo.PushContext(ctx, &git.PushOptions{
 		RemoteName: "github",
+		Auth:       gitAuth,
 		Force:      true,
 		RefSpecs:   []config.RefSpec{"refs/tags/*:refs/tags/*"},
 	}); err != nil {
@@ -813,6 +851,7 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 
 			if err = entry.GitRepo.PushContext(ctx, &git.PushOptions{
 				RemoteName: "github",
+				Auth:       gitAuth,
 				RefSpecs: []config.RefSpec{
 					config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", sourceBranchForClosedOrOpenForkPullRequest)),
 				},
@@ -872,6 +911,7 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 
 				if err = entry.GitRepo.PushContext(ctx, &git.PushOptions{
 					RemoteName: "github",
+					Auth:       gitAuth,
 					RefSpecs: []config.RefSpec{
 						config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", giteaPullRequest.Head.Ref)),
 					},
@@ -917,6 +957,7 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 			entry.Logger.Debug("pushing branches for merged/closed pull request", "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
 			if err = entry.GitRepo.PushContext(ctx, &git.PushOptions{
 				RemoteName: "github",
+				Auth:       gitAuth,
 				RefSpecs: []config.RefSpec{
 					config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", giteaPullRequest.Head.Ref)),
 					config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", giteaPullRequest.Base.Ref)),
@@ -1039,6 +1080,7 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 
 			if err = entry.GitRepo.PushContext(ctx, &git.PushOptions{
 				RemoteName: "github",
+				Auth:       gitAuth,
 				RefSpecs: []config.RefSpec{
 					config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", giteaPullRequest.Head.Ref)),
 				},
@@ -1134,6 +1176,7 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 		}
 		if err = entry.GitRepo.PushContext(ctx, &git.PushOptions{
 			RemoteName: "github",
+			Auth:       gitAuth,
 			RefSpecs:   refSpec,
 			Force:      true,
 		}); err != nil {
