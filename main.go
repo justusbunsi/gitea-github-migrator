@@ -816,6 +816,7 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBranch string, githubLookupRequired bool, giteaPullRequest *gitea.PullRequest) error {
 	if cache.isCompleted(entry.GetCacheID(), giteaPullRequest.Index) {
 		entry.Logger.Debug("skipping already completed pull request", "pr_number", giteaPullRequest.Index)
+		entry.PRSuccessCount++
 		return nil
 	}
 
@@ -1305,6 +1306,7 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 func migrateIssue(ctx context.Context, entry *migration.Entry, githubLookupRequired bool, giteaIssue *gitea.Issue) error {
 	if cache.isCompleted(entry.GetCacheID(), giteaIssue.Index) {
 		entry.Logger.Debug("skipping already completed issue", "issue_number", giteaIssue.Index)
+		entry.IssueSuccessCount++
 		return nil
 	}
 
