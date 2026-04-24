@@ -24,6 +24,7 @@ import (
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/go-git/go-git/v5/storage/memory"
 	"github.com/google/go-github/v74/github"
 	"github.com/hashicorp/go-hclog"
@@ -68,6 +69,22 @@ func (d *dynamicGitAuth) SetAuth(r *http.Request) {
 		return
 	}
 	r.SetBasicAuth("x-access-token", token)
+}
+
+func pushWithRetry(ctx context.Context, repo *git.Repository, opts *git.PushOptions, log hclog.Logger) error {
+	var err error
+	for attempt := range 3 {
+		err = repo.PushContext(ctx, opts)
+		isAuthErr := errors.Is(err, transport.ErrAuthenticationRequired) || errors.Is(err, transport.ErrAuthorizationFailed)
+		if !isAuthErr {
+			return err
+		}
+		if attempt < 2 {
+			log.Warn("git push authentication failed, retrying", "attempt", attempt+1, "error", err)
+			time.Sleep(2 * time.Second)
+		}
+	}
+	return err
 }
 
 type Project = []string
@@ -537,12 +554,12 @@ func migrateProject(ctx context.Context, proj []string) error {
 	}
 
 	entry.Logger.Debug("force-pushing to GitHub repository", "url", githubUrl)
-	if err = entry.GitRepo.PushContext(ctx, &git.PushOptions{
+	if err = pushWithRetry(ctx, entry.GitRepo, &git.PushOptions{
 		RemoteName: "github",
 		Auth:       gitAuth,
 		Force:      true,
 		//Prune:      true, // causes error, attempts to delete main branch
-	}); err != nil {
+	}, entry.Logger); err != nil {
 		if errors.Is(err, git.NoErrAlreadyUpToDate) {
 			entry.Logger.Debug("repository already up-to-date on GitHub", "url", githubUrl)
 		} else {
@@ -551,12 +568,12 @@ func migrateProject(ctx context.Context, proj []string) error {
 	}
 
 	entry.Logger.Debug("pushing tags to GitHub repository", "url", githubUrl)
-	if err = entry.GitRepo.PushContext(ctx, &git.PushOptions{
+	if err = pushWithRetry(ctx, entry.GitRepo, &git.PushOptions{
 		RemoteName: "github",
 		Auth:       gitAuth,
 		Force:      true,
 		RefSpecs:   []config.RefSpec{"refs/tags/*:refs/tags/*"},
-	}); err != nil {
+	}, entry.Logger); err != nil {
 		if errors.Is(err, git.NoErrAlreadyUpToDate) {
 			entry.Logger.Debug("repository already up-to-date on GitHub", "url", githubUrl)
 		} else {
@@ -850,14 +867,14 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 
 			entry.Logger.Trace("pushing source branch for open pull request from fork", "repository_id", entry.GiteaRepository.ID, "pr_number", giteaPullRequest.Index)
 
-			if err = entry.GitRepo.PushContext(ctx, &git.PushOptions{
+			if err = pushWithRetry(ctx, entry.GitRepo, &git.PushOptions{
 				RemoteName: "github",
 				Auth:       gitAuth,
 				RefSpecs: []config.RefSpec{
 					config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", sourceBranchForClosedOrOpenForkPullRequest)),
 				},
 				Force: true,
-			}); err != nil {
+			}, entry.Logger); err != nil {
 				if errors.Is(err, git.NoErrAlreadyUpToDate) {
 					entry.Logger.Trace("open fork PR branch already exists and is up-to-date on GitHub", "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
 				} else {
@@ -910,14 +927,14 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 			if strings.EqualFold(string(giteaPullRequest.State), string(gitea.StateOpen)) {
 				entry.Logger.Trace("pushing source branch for empty commit list pull request", "repository_id", entry.GiteaRepository.ID, "pr_number", giteaPullRequest.Index)
 
-				if err = entry.GitRepo.PushContext(ctx, &git.PushOptions{
+				if err = pushWithRetry(ctx, entry.GitRepo, &git.PushOptions{
 					RemoteName: "github",
 					Auth:       gitAuth,
 					RefSpecs: []config.RefSpec{
 						config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", giteaPullRequest.Head.Ref)),
 					},
 					Force: true,
-				}); err != nil {
+				}, entry.Logger); err != nil {
 					if errors.Is(err, git.NoErrAlreadyUpToDate) {
 						entry.Logger.Trace("empty commit list branch already exists and is up-to-date on GitHub", "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
 					} else {
@@ -956,7 +973,7 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 			}
 
 			entry.Logger.Debug("pushing branches for merged/closed pull request", "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
-			if err = entry.GitRepo.PushContext(ctx, &git.PushOptions{
+			if err = pushWithRetry(ctx, entry.GitRepo, &git.PushOptions{
 				RemoteName: "github",
 				Auth:       gitAuth,
 				RefSpecs: []config.RefSpec{
@@ -964,7 +981,7 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 					config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", giteaPullRequest.Base.Ref)),
 				},
 				Force: true,
-			}); err != nil {
+			}, entry.Logger); err != nil {
 				if errors.Is(err, git.NoErrAlreadyUpToDate) {
 					entry.Logger.Trace("branch already exists and is up-to-date on GitHub", "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
 				} else {
@@ -1079,14 +1096,14 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 
 			entry.Logger.Trace("pushing reset empty commit list pull request branch", "repository_id", entry.GiteaRepository.ID, "pr_number", giteaPullRequest.Index)
 
-			if err = entry.GitRepo.PushContext(ctx, &git.PushOptions{
+			if err = pushWithRetry(ctx, entry.GitRepo, &git.PushOptions{
 				RemoteName: "github",
 				Auth:       gitAuth,
 				RefSpecs: []config.RefSpec{
 					config.RefSpec(fmt.Sprintf("refs/heads/%[1]s:refs/heads/%[1]s", giteaPullRequest.Head.Ref)),
 				},
 				Force: true,
-			}); err != nil {
+			}, entry.Logger); err != nil {
 				if errors.Is(err, git.NoErrAlreadyUpToDate) {
 					entry.Logger.Trace("empty commit list branch already exists and is up-to-date on GitHub", "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
 				} else {
@@ -1175,12 +1192,12 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 				config.RefSpec(fmt.Sprintf(":refs/heads/%s", giteaPullRequest.Base.Ref)),
 			}
 		}
-		if err = entry.GitRepo.PushContext(ctx, &git.PushOptions{
+		if err = pushWithRetry(ctx, entry.GitRepo, &git.PushOptions{
 			RemoteName: "github",
 			Auth:       gitAuth,
 			RefSpecs:   refSpec,
 			Force:      true,
-		}); err != nil {
+		}, entry.Logger); err != nil {
 			if errors.Is(err, git.NoErrAlreadyUpToDate) {
 				entry.Logger.Trace("branches already deleted on GitHub", "pr_number", githubPullRequest.GetNumber(), "source_branch", giteaPullRequest.Head.Ref, "target_branch", giteaPullRequest.Base.Ref)
 			} else {
