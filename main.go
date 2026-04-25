@@ -38,7 +38,7 @@ import (
 
 var loop, report bool
 var deleteExistingRepos, enablePullRequests, enableIssues, renameMasterToMain bool
-var githubDomain, githubRepo, githubToken, githubUser, giteaDomain, giteaProject, giteaToken, projectsCsvPath, renameTrunkBranch, cacheFilePath string
+var githubDomain, githubRepo, githubToken, giteaDomain, giteaProject, giteaToken, projectsCsvPath, renameTrunkBranch, cacheFilePath string
 var githubAppID, githubAppPrivateKeyFile string
 var githubAppInstallationID int64
 
@@ -182,7 +182,6 @@ func main() {
 
 	flag.StringVar(&githubDomain, "github-domain", constants.DefaultGithubDomain, "specifies the GitHub domain to use")
 	flag.StringVar(&githubRepo, "github-repo", "", "the GitHub repository to migrate to")
-	flag.StringVar(&githubUser, "github-user", "", "specifies the GitHub user to use, who will author any migrated PRs (required)")
 	flag.StringVar(&giteaDomain, "gitea-domain", constants.DefaultGiteaDomain, "specifies the Gitea domain to use")
 	flag.StringVar(&giteaProject, "gitea-project", "", "the Gitea project to migrate")
 	flag.StringVar(&projectsCsvPath, "projects-csv", "", "specifies the path to a CSV file describing projects to migrate (incompatible with -gitea-project and -github-repo)")
@@ -196,15 +195,6 @@ func main() {
 	flag.StringVar(&githubAppPrivateKeyFile, "github-app-private-key", "", "path to the GitHub App private key PEM file")
 
 	flag.Parse()
-
-	if githubUser == "" {
-		githubUser = os.Getenv("GITHUB_USER")
-	}
-
-	if githubUser == "" {
-		logger.Error("must specify GitHub user")
-		os.Exit(1)
-	}
 
 	githubToken = os.Getenv("GITHUB_TOKEN")
 	usingAppAuth := githubAppID != "" || githubAppInstallationID != 0 || githubAppPrivateKeyFile != ""

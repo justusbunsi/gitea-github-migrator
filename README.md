@@ -30,7 +30,7 @@ Golang 1.23 was used, you may have luck with earlier releases.
 _Example Usage_
 
 ```
-gitea-github-migrator -github-user=mytokenuser -gitea-project=mygiteauser/myproject -github-repo=mygithubuser/myrepo -migrate-pull-requests -migrate-issues
+gitea-github-migrator -gitea-project=mygiteauser/myproject -github-repo=mygithubuser/myrepo -migrate-pull-requests -migrate-issues
 ```
 
 Written in Go, this is a cross-platform CLI utility that accepts the following runtime arguments:
@@ -42,8 +42,6 @@ Written in Go, this is a cross-platform CLI utility that accepts the following r
         specifies the GitHub domain to use (default "github.com")
   -github-repo string
         the GitHub repository to migrate to
-  -github-user string
-        specifies the GitHub user to use, who will author any migrated PRs (required)
   -gitea-domain string
         specifies the Gitea domain to use (default "gitea.com")
   -gitea-project string
@@ -77,8 +75,6 @@ Written in Go, this is a cross-platform CLI utility that accepts the following r
   -github-app-private-key string
         path to the GitHub App private key PEM file (see https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/managing-private-keys-for-github-apps)
 ```
-
-Use the `-github-user` argument to specify the GitHub username for whom the authentication token was issued (mandatory). You can also specify this with the `GITHUB_USER` environment variable.
 
 You can specify an individual Gitea project with the `-gitea-project` argument, along with the target GitHub repository with the `-github-repo` argument.
 
