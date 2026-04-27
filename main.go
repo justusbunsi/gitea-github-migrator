@@ -1111,29 +1111,29 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 		return fmt.Errorf("creating worktree: %v", err)
 	}
 
-	if githubPullRequest == nil {
-		entry.Logger.Trace("loading pull request head commit", "pr_number", giteaPullRequest.Index, "head_sha", prHeadRef)
-		prHeadHash := plumbing.NewHash(prHeadRef)
-		prHeadCommit, err := object.GetCommit(entry.GitRepo.Storer, prHeadHash)
-		if err != nil {
-			return fmt.Errorf("loading pull request head commit: %v", err)
-		}
-		entry.Logger.Trace("loading merge base", "pr_number", giteaPullRequest.Index, "pr_merge_base", giteaPullRequest.MergeBase)
-		mergeBaseHash := plumbing.NewHash(giteaPullRequest.MergeBase)
-		mergeBaseCommit, err := object.GetCommit(entry.GitRepo.Storer, mergeBaseHash)
-		if err != nil {
-			return fmt.Errorf("loading merge base: %v", err)
-		}
-		entry.Logger.Trace("detecting best common ancestor", "pr_number", giteaPullRequest.Index, "base", mergeBaseHash, "head", prHeadHash)
-		bases, err := mergeBaseCommit.MergeBase(prHeadCommit)
-		if err != nil {
-			return fmt.Errorf("detecting best common ancestor: %v", err)
-		}
-		if len(bases) == 0 {
-			entry.Logger.Trace("orphaned head commit detected", "pr_number", giteaPullRequest.Index, "sha", prHeadHash)
-			tmpEmptyCommitRequired = true
-		}
+	entry.Logger.Trace("loading pull request head commit", "pr_number", giteaPullRequest.Index, "head_sha", prHeadRef)
+	prHeadHash := plumbing.NewHash(prHeadRef)
+	prHeadCommit, err := object.GetCommit(entry.GitRepo.Storer, prHeadHash)
+	if err != nil {
+		return fmt.Errorf("loading pull request head commit: %v", err)
+	}
+	entry.Logger.Trace("loading merge base", "pr_number", giteaPullRequest.Index, "pr_merge_base", giteaPullRequest.MergeBase)
+	mergeBaseHash := plumbing.NewHash(giteaPullRequest.MergeBase)
+	mergeBaseCommit, err := object.GetCommit(entry.GitRepo.Storer, mergeBaseHash)
+	if err != nil {
+		return fmt.Errorf("loading merge base: %v", err)
+	}
+	entry.Logger.Trace("detecting best common ancestor", "pr_number", giteaPullRequest.Index, "base", mergeBaseHash, "head", prHeadHash)
+	bases, err := mergeBaseCommit.MergeBase(prHeadCommit)
+	if err != nil {
+		return fmt.Errorf("detecting best common ancestor: %v", err)
+	}
+	if len(bases) == 0 {
+		entry.Logger.Trace("orphaned head commit detected", "pr_number", giteaPullRequest.Index, "sha", prHeadHash)
+		tmpEmptyCommitRequired = true
+	}
 
+	if githubPullRequest == nil {
 		if isOpenForkPR {
 			entry.Logger.Trace("checkout source branch for open pull request from fork", "repository_id", entry.GiteaRepository.ID, "pr_number", giteaPullRequest.Index)
 			if err = worktree.Checkout(&git.CheckoutOptions{
@@ -1432,6 +1432,12 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 		case "open":
 			newState = h.Pointer("open")
 		case "closed", "merged":
+			newState = h.Pointer("closed")
+		}
+
+		// PRs with empty commit lists or orphaned commits are auto-closed by GitHub and cannot be reopened.
+		if tmpEmptyCommitRequired && newState != nil && *newState == "open" {
+			entry.Logger.Debug("keeping PR closed - auto-closed by GitHub due to empty commit list or orphaned commit, cannot reopen", "pr_number", githubPullRequest.GetNumber())
 			newState = h.Pointer("closed")
 		}
 
