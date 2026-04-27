@@ -1367,7 +1367,7 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 	} else {
 		var newState *string
 		switch giteaPullRequest.State {
-		case "opened":
+		case "open":
 			newState = h.Pointer("open")
 		case "closed", "merged":
 			newState = h.Pointer("closed")
