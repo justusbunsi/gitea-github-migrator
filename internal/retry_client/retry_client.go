@@ -55,7 +55,7 @@ func New(logger hclog.Logger) *retryablehttp.Client {
 		}
 
 		defer func() {
-			logger.Trace("waiting before retrying failed API request", "method", requestMethod, "url", requestUrl, "status", resp.StatusCode, "sleep", sleep, "attempt", attemptNum, "max_attempts", retryClient.RetryMax)
+			logger.Warn("waiting before retrying failed API request", "method", requestMethod, "url", requestUrl, "status", resp.StatusCode, "sleep", sleep, "attempt", attemptNum, "max_attempts", retryClient.RetryMax)
 		}()
 
 		if resp != nil {
@@ -173,7 +173,7 @@ func New(logger hclog.Logger) *retryablehttp.Client {
 					*req = *req.WithContext(context.WithValue(ctx, retryableContextKey, errResp))
 				}
 
-				logger.Trace("retrying failed API request", "method", requestMethod, "url", requestUrl, "status", resp.StatusCode, "message", errResp.Message)
+				logger.Warn("retrying failed API request", "method", requestMethod, "url", requestUrl, "status", resp.StatusCode, "message", errResp.Message)
 				return true, nil
 			}
 		}
