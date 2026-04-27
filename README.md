@@ -8,6 +8,7 @@ This tool can migrate projects from Gitea to repositories on GitHub. It currentl
 * migrating the git repository with full history
 * migrating pull requests and translating them into pull requests, including closed/merged ones
 * migrating issues, including closed ones
+* migrating releases (including draft and pre-release)
 * renaming the `master` branch to `main` along the way
 
 It does not support migrating wikis or any other primitive at this time. PRs welcome! (Although please don't waste your time suggesting swathing changes by an LLM)
@@ -54,6 +55,8 @@ Written in Go, this is a cross-platform CLI utility that accepts the following r
         whether pull requests should be migrated
   -migrate-issues
         whether issues should be migrated
+  -migrate-releases
+        whether releases should be migrated (creates GitHub releases on top of mirrored tags)
   -projects-csv string
         specifies the path to a CSV file describing projects to migrate (incompatible with -gitea-project and -github-repo)
   -rename-master-to-main
@@ -92,6 +95,8 @@ For authentication, the `GITEA_TOKEN` environment variable must always be popula
 To enable migration of Gitea pull requests to GitHub pull requests (including closed/merged ones!), specify `-migrate-pull-requests`.
 
 To enable migration of Gitea issues to GitHub issues (including closed ones!), specify `-migrate-issues`.
+
+To enable migration of Gitea releases to GitHub releases (including drafts and pre-releases!), specify `-migrate-releases`. Releases require the corresponding tags to exist in the mirrored git repository — this tool verifies tag presence locally before attempting creation. If a tag is missing, the release is skipped and counted as a failure. When used together with `-cache-file`, releases are tracked under a separate `completed_releases` / `failed_releases` section in the cache file, keyed by Gitea release ID.
 
 Note: If `-migrate-pull-requests` and `-migrate-issues` are both enabled, the issue/pull ID order will be preserved on GitHub. On errors creating issues/pulls, the tool stops migrating that repository to prevent ID mismatches. In case of deleted issues/pulls in Gitea, a phantom issue is created to allocate the ID.
 
@@ -145,6 +150,16 @@ _Example migrated pull request (open)_
 _Example migrated pull request (closed)_
 
 ![example migrated closed pull request](pr-example-closed.jpeg)
+
+## Releases
+
+Whilst the git repository (including tags) will be migrated verbatim, releases are managed using the GitHub API and will be authored by the person supplying the authentication token.
+
+Each release body will be prepended with a Markdown table showing the original author and relevant metadata: tag name, creation date, publication date, draft and pre-release status, and target commitish. The original release description follows in a separate section.
+
+Release migration is idempotent: each run looks up the existing GitHub release by tag name (or by cached release ID when a `-cache-file` is in use) and updates it only when the content has changed. Changes are detected via an MD5 hash of the title, body, draft flag, pre-release flag, and creation date.
+
+Asset files attached to Gitea releases are not migrated.
 
 ## Issues
 

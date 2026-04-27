@@ -39,7 +39,7 @@ import (
 )
 
 var loop, report bool
-var deleteExistingRepos, enablePullRequests, enableIssues, renameMasterToMain bool
+var deleteExistingRepos, enablePullRequests, enableIssues, enableReleases, renameMasterToMain bool
 var githubDomain, githubRepo, githubToken, giteaDomain, giteaProject, giteaToken, projectsCsvPath, renameTrunkBranch, cacheFilePath string
 var githubAppID, githubAppPrivateKeyFile string
 var githubAppInstallationID int64
@@ -130,6 +130,7 @@ type Report struct {
 	RepoName          string
 	IssuesCount       int
 	PullRequestsCount int
+	ReleasesCount     int
 }
 
 func sendErr(err error) {
@@ -180,6 +181,7 @@ func main() {
 	flag.BoolVar(&deleteExistingRepos, "delete-existing-repos", false, "whether existing repositories should be deleted before migrating")
 	flag.BoolVar(&enablePullRequests, "migrate-pull-requests", false, "whether pull requests should be migrated")
 	flag.BoolVar(&enableIssues, "migrate-issues", false, "whether issues should be migrated")
+	flag.BoolVar(&enableReleases, "migrate-releases", false, "whether releases should be migrated (creates GitHub releases on top of mirrored tags)")
 	flag.BoolVar(&renameMasterToMain, "rename-master-to-main", false, "rename master branch to main and update pull requests (incompatible with -rename-trunk-branch)")
 
 	flag.StringVar(&githubDomain, "github-domain", constants.DefaultGithubDomain, "specifies the GitHub domain to use")
@@ -244,8 +246,8 @@ func main() {
 		if loop {
 			logger.Info("ignoring -loop in report mode")
 		}
-		if deleteExistingRepos || enableIssues || enablePullRequests {
-			logger.Info("ignoring migration flags in report mode", "delete-existing-repos", deleteExistingRepos, "migrate-issues", enableIssues, "migrate-pull-requests", enablePullRequests)
+		if deleteExistingRepos || enableIssues || enablePullRequests || enableReleases {
+			logger.Info("ignoring migration flags in report mode", "delete-existing-repos", deleteExistingRepos, "migrate-issues", enableIssues, "migrate-pull-requests", enablePullRequests, "migrate-releases", enableReleases)
 		}
 	}
 
@@ -346,15 +348,18 @@ func printReport(ctx context.Context, projects []Project) {
 
 	totalIssues := 0
 	totalPullRequests := 0
+	totalReleases := 0
 	for _, result := range results {
 		totalIssues += result.IssuesCount
 		totalPullRequests += result.PullRequestsCount
+		totalReleases += result.ReleasesCount
 		fmt.Printf("%#v\n", result)
 	}
 
 	fmt.Println()
 	fmt.Printf("Total issues: %d\n", totalIssues)
 	fmt.Printf("Total pull requests: %d\n", totalPullRequests)
+	fmt.Printf("Total releases: %d\n", totalReleases)
 	fmt.Println()
 }
 
@@ -374,11 +379,20 @@ func reportProject(ctx context.Context, proj []string) (*Report, error) {
 		return nil, err
 	}
 
+	var releaseCount int
+	if enableReleases {
+		_, releaseCount, err = entry.GetAllGiteaReleases(ctx, true)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return &Report{
 		OwnerName:         entry.GiteaOwner,
 		RepoName:          entry.GiteaRepo,
 		IssuesCount:       issueCount,
 		PullRequestsCount: prCount,
+		ReleasesCount:     releaseCount,
 	}, nil
 }
 
@@ -523,7 +537,7 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 		return !createRepo && (!repoKnownInCache || cache.isFailed(entry.GetCacheID(), index))
 	}
 
-	if cacheFilePath != "" && !createRepo && !repoKnownInCache {
+	if cacheFilePath != "" && !createRepo && !repoKnownInCache && (enableIssues || enablePullRequests) {
 		return fmt.Errorf("repository %s/%s already exists on GitHub but is not tracked in cache; use -delete-existing-repos to recreate it or provide a cache file from a previous run of this repository or do not use -cache-file entirely", entry.GitHubOwner, entry.GitHubRepo)
 	}
 
@@ -654,11 +668,20 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 		return fmt.Errorf("setting default branch: %v", err)
 	}
 
-	if !enableIssues && !enablePullRequests {
+	if !enableIssues && !enablePullRequests && !enableReleases {
 		if bar != nil {
 			bar.Set(1)
 		}
 		return nil
+	}
+
+	var giteaReleases []*gitea.Release
+	if enableReleases {
+		var err error
+		giteaReleases, _, err = entry.GetAllGiteaReleases(ctx, false)
+		if err != nil {
+			return err
+		}
 	}
 
 	if enableIssues && enablePullRequests {
@@ -696,7 +719,7 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 		}
 		giteaItems = filled
 		if bar != nil {
-			bar.Total = uint16(len(giteaItems))
+			bar.Total = uint16(len(giteaItems) + len(giteaReleases))
 		}
 
 		entry.Logger.Info("migrating issues and pull requests from Gitea to GitHub", "issues", totalCount-prTotalCount, "pull_requests", prTotalCount, "phantom_items", phantomItemsCount)
@@ -816,7 +839,7 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 
 			entry.Logger.Info("migrating issues from Gitea to GitHub", "count", totalCount)
 			if bar != nil {
-				bar.Total = uint16(len(giteaIssues))
+				bar.Total = uint16(len(giteaIssues) + len(giteaReleases))
 			}
 			for _, giteaIssue := range giteaIssues {
 				if giteaIssue == nil {
@@ -870,7 +893,7 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 
 			entry.Logger.Info("migrating pull requests from Gitea to GitHub", "count", totalCount)
 			if bar != nil {
-				bar.Total = uint16(len(giteaPullRequests))
+				bar.Total = uint16(len(giteaPullRequests) + len(giteaReleases))
 			}
 			for _, giteaPullRequest := range giteaPullRequests {
 				if giteaPullRequest == nil {
@@ -916,6 +939,45 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 			skippedCount := totalCount - entry.PRSuccessCount - entry.PRFailureCount
 			entry.Logger.Info("migrated pull requests from Gitea to GitHub", "successful", entry.PRSuccessCount, "failed", entry.PRFailureCount, "skipped", skippedCount)
 		}
+	}
+
+	if enableReleases {
+		if bar != nil && !enableIssues && !enablePullRequests {
+			bar.Total = uint16(len(giteaReleases))
+		}
+
+		entry.Logger.Info("migrating releases from Gitea to GitHub", "count", len(giteaReleases))
+		cacheID := entry.GetCacheID()
+		for _, giteaRelease := range giteaReleases {
+			if giteaRelease == nil {
+				continue
+			}
+
+			// Check for context cancellation
+			if err := ctx.Err(); err != nil {
+				sendErr(fmt.Errorf("preparing to migrate release: %v", err))
+				break
+			}
+
+			err := migrateRelease(ctx, entry, giteaRelease)
+			if err != nil {
+				cache.markReleaseFailed(cacheID, giteaRelease.ID)
+				sendErr(fmt.Errorf("migrating release %s: %v", giteaRelease.TagName, err))
+				entry.ReleaseFailureCount++
+			} else {
+				cache.markReleaseCompleted(cacheID, giteaRelease.ID, releaseCacheEntry{
+					ContentHash:     computeReleaseContentHash(giteaRelease),
+					GitHubReleaseID: entry.GitHubReleaseID,
+				})
+				entry.ReleaseSuccessCount++
+			}
+			if bar != nil {
+				bar.Inc()
+			}
+		}
+
+		skippedCount := len(giteaReleases) - entry.ReleaseSuccessCount - entry.ReleaseFailureCount
+		entry.Logger.Info("migrated releases from Gitea to GitHub", "successful", entry.ReleaseSuccessCount, "failed", entry.ReleaseFailureCount, "skipped", skippedCount)
 	}
 
 	return nil
@@ -1608,5 +1670,145 @@ func migrateIssue(ctx context.Context, entry *migration.Entry, githubLookupRequi
 	}
 
 	entry.GitHubItemID = int64(githubIssue.GetNumber())
+	return nil
+}
+
+func computeReleaseContentHash(release *gitea.Release) string {
+	s := md5.Sum([]byte(fmt.Sprintf("%s\x00%s\x00%v\x00%v\x00%s",
+		release.Title, release.Note, release.IsDraft, release.IsPrerelease, release.CreatedAt.Format(time.RFC3339))))
+	return hex.EncodeToString(s[:])
+}
+
+func migrateRelease(ctx context.Context, entry *migration.Entry, giteaRelease *gitea.Release) error {
+	entry.GitHubReleaseID = 0
+	cacheID := entry.GetCacheID()
+
+	// Draft releases may reference a tag that doesn't exist yet — skip the check for those.
+	if !giteaRelease.IsDraft {
+		if _, err := entry.GitRepo.Reference(plumbing.NewTagReferenceName(giteaRelease.TagName), false); err != nil {
+			return fmt.Errorf("tag %q not found in local repository: %v", giteaRelease.TagName, err)
+		}
+	}
+
+	contentHash := computeReleaseContentHash(giteaRelease)
+
+	var resumeEntry *releaseCacheEntry
+	if cached, ok := cache.getCompletedReleaseEntry(cacheID, giteaRelease.ID); ok {
+		if cached.ContentHash == contentHash {
+			entry.Logger.Debug("skipping unchanged release (hash match)", "tag", giteaRelease.TagName)
+			entry.GitHubReleaseID = cached.GitHubReleaseID
+			return nil
+		}
+		resumeEntry = &cached
+	}
+
+	note := giteaRelease.Note
+	if strings.TrimSpace(note) == "" {
+		note = "_No description_"
+	}
+	draftLabel := "No"
+	if giteaRelease.IsDraft {
+		draftLabel = "Yes"
+	}
+	prereleaseLabel := "No"
+	if giteaRelease.IsPrerelease {
+		prereleaseLabel = "Yes"
+	}
+
+	body := fmt.Sprintf(`> [!NOTE]
+> This release was migrated from Gitea
+>
+> |      |      |
+> | ---- | ---- |
+> | **Original Author** | %[1]s |
+> | **Tag Name** | %[2]s |
+> | **Date Originally Created** | %[3]s |
+> | **Date Originally Published** | %[4]s |
+> | **Draft** | %[5]s |
+> | **Pre-release** | %[6]s |
+> | **Target Commitish** | %[7]s |
+> |      |      |
+
+## Original Description
+
+%[8]s`,
+		h.GetGitHubAccountReference(giteaRelease.Publisher),
+		giteaRelease.TagName,
+		giteaRelease.CreatedAt.Format(constants.DateFormat),
+		giteaRelease.PublishedAt.Format(constants.DateFormat),
+		draftLabel,
+		prereleaseLabel,
+		giteaRelease.Target,
+		note)
+
+	if len(body) > constants.GithubBodyLimit {
+		entry.Logger.Warn("release body was truncated due to platform limits", "tag", giteaRelease.TagName)
+		body = body[:constants.GithubBodyLimit] + "..."
+	}
+
+	var githubRelease *github.RepositoryRelease
+
+	if resumeEntry != nil {
+		entry.Logger.Debug("fetching existing release by cached ID", "tag", giteaRelease.TagName, "github_release_id", resumeEntry.GitHubReleaseID)
+		r, _, err := gh.Repositories.GetRelease(ctx, entry.GitHubOwner, entry.GitHubRepo, resumeEntry.GitHubReleaseID)
+		if err != nil {
+			return fmt.Errorf("retrieving release: %v", err)
+		}
+		githubRelease = r
+	} else {
+		entry.Logger.Debug("looking up existing release by tag", "tag", giteaRelease.TagName)
+		r, resp, err := gh.Repositories.GetReleaseByTag(ctx, entry.GitHubOwner, entry.GitHubRepo, giteaRelease.TagName)
+		if err != nil && (resp == nil || resp.StatusCode != http.StatusNotFound) {
+			return fmt.Errorf("looking up release by tag: %v", err)
+		}
+		if err == nil {
+			githubRelease = r
+		}
+	}
+
+	if githubRelease == nil {
+		entry.Logger.Info("creating release", "tag", giteaRelease.TagName)
+		r, _, err := gh.Repositories.CreateRelease(ctx, entry.GitHubOwner, entry.GitHubRepo, &github.RepositoryRelease{
+			TagName:    h.Pointer(giteaRelease.TagName),
+			Name:       h.Pointer(giteaRelease.Title),
+			Body:       h.Pointer(body),
+			Draft:      h.Pointer(giteaRelease.IsDraft),
+			Prerelease: h.Pointer(giteaRelease.IsPrerelease),
+		})
+		if err != nil {
+			return fmt.Errorf("creating release: %v", err)
+		}
+		if err := h.SleepWithContext(ctx, constants.GithubApiPauseBetweenMutativeRequests); err != nil {
+			return err
+		}
+		githubRelease = r
+	} else {
+		needsUpdate := (githubRelease.Name == nil || *githubRelease.Name != giteaRelease.Title) ||
+			(githubRelease.Body == nil || *githubRelease.Body != body) ||
+			(githubRelease.Draft == nil || *githubRelease.Draft != giteaRelease.IsDraft) ||
+			(githubRelease.Prerelease == nil || *githubRelease.Prerelease != giteaRelease.IsPrerelease)
+
+		if needsUpdate {
+			entry.Logger.Info("updating release", "tag", giteaRelease.TagName)
+			r, _, err := gh.Repositories.EditRelease(ctx, entry.GitHubOwner, entry.GitHubRepo, githubRelease.GetID(), &github.RepositoryRelease{
+				TagName:    h.Pointer(giteaRelease.TagName),
+				Name:       h.Pointer(giteaRelease.Title),
+				Body:       h.Pointer(body),
+				Draft:      h.Pointer(giteaRelease.IsDraft),
+				Prerelease: h.Pointer(giteaRelease.IsPrerelease),
+			})
+			if err != nil {
+				return fmt.Errorf("updating release: %v", err)
+			}
+			if err := h.SleepWithContext(ctx, constants.GithubApiPauseBetweenMutativeRequests); err != nil {
+				return err
+			}
+			githubRelease = r
+		} else {
+			entry.Logger.Trace("existing release is up-to-date", "tag", giteaRelease.TagName)
+		}
+	}
+
+	entry.GitHubReleaseID = githubRelease.GetID()
 	return nil
 }

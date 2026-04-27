@@ -11,20 +11,23 @@ import (
 )
 
 type Entry struct {
-	GiteaOwner        string
-	GiteaRepo         string
-	GitHubOwner       string
-	GitHubRepo        string
-	Logger            hclog.Logger
-	PRSuccessCount    int
-	PRFailureCount    int
-	IssueSuccessCount int
-	IssueFailureCount int
-	GitHubItemID      int64
-	GiteaRepository   *gitea.Repository
-	GitRepo           *git.Repository
-	giteaClient       *gitea.Client
-	githubClient      *github.Client
+	GiteaOwner          string
+	GiteaRepo           string
+	GitHubOwner         string
+	GitHubRepo          string
+	Logger              hclog.Logger
+	PRSuccessCount      int
+	PRFailureCount      int
+	IssueSuccessCount   int
+	IssueFailureCount   int
+	GitHubItemID        int64
+	GitHubReleaseID     int64
+	ReleaseSuccessCount int
+	ReleaseFailureCount int
+	GiteaRepository     *gitea.Repository
+	GitRepo             *git.Repository
+	giteaClient         *gitea.Client
+	githubClient        *github.Client
 }
 
 func NewEntry(giteaSlug, githubSlug string, giteaClient *gitea.Client, githubClient *github.Client, logger hclog.Logger) (*Entry, error) {
