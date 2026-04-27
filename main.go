@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
 	"encoding/csv"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -28,12 +30,12 @@ import (
 	"github.com/go-git/go-git/v5/storage/memory"
 	"github.com/google/go-github/v74/github"
 	"github.com/hashicorp/go-hclog"
-	"github.com/justusbunsi/progress-bar/progressbar"
 	"github.com/justusbunsi/gitea-github-migrator/internal/constants"
 	"github.com/justusbunsi/gitea-github-migrator/internal/github_client"
 	h "github.com/justusbunsi/gitea-github-migrator/internal/helpers"
 	"github.com/justusbunsi/gitea-github-migrator/internal/migration"
 	"github.com/justusbunsi/gitea-github-migrator/internal/retry_client"
+	"github.com/justusbunsi/progress-bar/progressbar"
 )
 
 var loop, report bool
@@ -712,6 +714,8 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 				break
 			}
 
+			cacheID := entry.GetCacheID()
+
 			if giteaItem.PullRequest != nil {
 				idx := slices.IndexFunc(giteaPullRequests, func(pr *gitea.PullRequest) bool {
 					return pr.Index == giteaItem.Index
@@ -722,25 +726,76 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 					// fail-fast
 					break
 				}
-				err = migratePullRequest(ctx, entry, defaultBranch, githubLookupRequired(giteaPullRequests[idx].Index), giteaPullRequests[idx])
+				prHash := computePRContentHash(giteaPullRequests[idx])
+				err := migratePullRequest(ctx, entry, defaultBranch, githubLookupRequired(giteaPullRequests[idx].Index), prHash, giteaPullRequests[idx])
 				if err != nil {
-					cache.markFailed(entry.GetCacheID(), giteaPullRequests[idx].Index)
+					cache.markFailed(cacheID, giteaPullRequests[idx].Index)
 					sendErr(err)
 					entry.PRFailureCount++
 					// fail-fast
 					entry.Logger.Error("stop migration due to error to prevent ID mismatch")
 					break
 				}
+				if entry.GitHubItemID > 0 {
+					var commentEntries map[int64]migration.CommentCacheEntry
+					if cached, ok := cache.getCompletedEntry(cacheID, giteaPullRequests[idx].Index); ok {
+						commentEntries = cached.CommentEntries
+					}
+					commentEntries, err = entry.MigrateComments(ctx, giteaPullRequests[idx].Index, entry.GitHubItemID, commentEntries)
+					if err != nil {
+						cache.markFailed(cacheID, giteaPullRequests[idx].Index)
+						sendErr(fmt.Errorf("migrating comments: %v", err))
+						entry.PRFailureCount++
+						// fail-fast
+						entry.Logger.Error("stop migration due to error to prevent ID mismatch")
+						break
+					}
+					cache.markCompleted(cacheID, giteaPullRequests[idx].Index, itemCacheEntry{
+						ContentHash:    prHash,
+						GitHubItemID:   entry.GitHubItemID,
+						CommentEntries: commentEntries,
+					})
+					entry.PRSuccessCount++
+				}
 			} else {
-				err = migrateIssue(ctx, entry, githubLookupRequired(giteaItem.Index), giteaItem)
+				issueHash := computeIssueContentHash(giteaItem)
+				err := migrateIssue(ctx, entry, githubLookupRequired(giteaItem.Index), issueHash, giteaItem)
 				if err != nil {
-					cache.markFailed(entry.GetCacheID(), giteaItem.Index)
+					cache.markFailed(cacheID, giteaItem.Index)
 					sendErr(err)
 					entry.IssueFailureCount++
 					// fail-fast
 					entry.Logger.Error("stop migration due to error to prevent ID mismatch")
 					break
 				}
+				if h.IsPhantomIssue(giteaItem) {
+					cache.markCompleted(cacheID, giteaItem.Index, itemCacheEntry{
+						ContentHash:  issueHash,
+						GitHubItemID: entry.GitHubItemID,
+					})
+					entry.IssueSuccessCount++
+					continue
+				}
+				// always migrate comments to update if necessary
+				var commentEntries map[int64]migration.CommentCacheEntry
+				if cached, ok := cache.getCompletedEntry(cacheID, giteaItem.Index); ok {
+					commentEntries = cached.CommentEntries
+				}
+				commentEntries, err = entry.MigrateComments(ctx, giteaItem.Index, entry.GitHubItemID, commentEntries)
+				if err != nil {
+					cache.markFailed(cacheID, giteaItem.Index)
+					sendErr(fmt.Errorf("migrating comments: %v", err))
+					entry.IssueFailureCount++
+					// fail-fast
+					entry.Logger.Error("stop migration due to error to prevent ID mismatch")
+					break
+				}
+				cache.markCompleted(cacheID, giteaItem.Index, itemCacheEntry{
+					ContentHash:    issueHash,
+					GitHubItemID:   entry.GitHubItemID,
+					CommentEntries: commentEntries,
+				})
+				entry.IssueSuccessCount++
 			}
 			if bar != nil {
 				bar.Inc()
@@ -752,6 +807,7 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 		entry.Logger.Info("migrated issues from Gitea to GitHub", "successful", entry.IssueSuccessCount, "failed", entry.IssueFailureCount, "skipped", issueSkipped)
 		entry.Logger.Info("migrated pull requests from Gitea to GitHub", "successful", entry.PRSuccessCount, "failed", entry.PRFailureCount, "skipped", prSkipped)
 	} else {
+		cacheID := entry.GetCacheID()
 		if enableIssues {
 			giteaIssues, totalCount, err := entry.GetAllGiteaIssues(ctx, gitea.IssueTypeIssue, false)
 			if err != nil {
@@ -772,11 +828,30 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 					break
 				}
 
-				err = migrateIssue(ctx, entry, githubLookupRequired(giteaIssue.Index), giteaIssue)
+				issueHash := computeIssueContentHash(giteaIssue)
+				err := migrateIssue(ctx, entry, githubLookupRequired(giteaIssue.Index), issueHash, giteaIssue)
 				if err != nil {
-					cache.markFailed(entry.GetCacheID(), giteaIssue.Index)
+					cache.markFailed(cacheID, giteaIssue.Index)
 					sendErr(err)
 					entry.IssueFailureCount++
+				} else {
+					var commentEntries map[int64]migration.CommentCacheEntry
+					if cached, ok := cache.getCompletedEntry(cacheID, giteaIssue.Index); ok {
+						commentEntries = cached.CommentEntries
+					}
+					commentEntries, err = entry.MigrateComments(ctx, giteaIssue.Index, entry.GitHubItemID, commentEntries)
+					if err != nil {
+						cache.markFailed(cacheID, giteaIssue.Index)
+						sendErr(fmt.Errorf("migrating comments: %v", err))
+						entry.IssueFailureCount++
+					} else {
+						cache.markCompleted(cacheID, giteaIssue.Index, itemCacheEntry{
+							ContentHash:    issueHash,
+							GitHubItemID:   entry.GitHubItemID,
+							CommentEntries: commentEntries,
+						})
+						entry.IssueSuccessCount++
+					}
 				}
 				if bar != nil {
 					bar.Inc()
@@ -808,11 +883,30 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 					break
 				}
 
-				err = migratePullRequest(ctx, entry, defaultBranch, githubLookupRequired(giteaPullRequest.Index), giteaPullRequest)
+				prHash := computePRContentHash(giteaPullRequest)
+				err := migratePullRequest(ctx, entry, defaultBranch, githubLookupRequired(giteaPullRequest.Index), prHash, giteaPullRequest)
 				if err != nil {
-					cache.markFailed(entry.GetCacheID(), giteaPullRequest.Index)
+					cache.markFailed(cacheID, giteaPullRequest.Index)
 					sendErr(err)
 					entry.PRFailureCount++
+				} else {
+					var commentEntries map[int64]migration.CommentCacheEntry
+					if cached, ok := cache.getCompletedEntry(cacheID, giteaPullRequest.Index); ok {
+						commentEntries = cached.CommentEntries
+					}
+					commentEntries, err = entry.MigrateComments(ctx, giteaPullRequest.Index, entry.GitHubItemID, commentEntries)
+					if err != nil {
+						cache.markFailed(cacheID, giteaPullRequest.Index)
+						sendErr(fmt.Errorf("migrating comments: %v", err))
+						entry.PRFailureCount++
+					} else {
+						cache.markCompleted(cacheID, giteaPullRequest.Index, itemCacheEntry{
+							ContentHash:    prHash,
+							GitHubItemID:   entry.GitHubItemID,
+							CommentEntries: commentEntries,
+						})
+						entry.PRSuccessCount++
+					}
 				}
 				if bar != nil {
 					bar.Inc()
@@ -827,11 +921,39 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 	return nil
 }
 
-func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBranch string, githubLookupRequired bool, giteaPullRequest *gitea.PullRequest) error {
-	if cache.isCompleted(entry.GetCacheID(), giteaPullRequest.Index) {
-		entry.Logger.Debug("skipping already completed pull request", "pr_number", giteaPullRequest.Index)
-		entry.PRSuccessCount++
-		return nil
+func computePRContentHash(pr *gitea.PullRequest) string {
+	var mergedAt, closedAt string
+	if pr.Merged != nil {
+		mergedAt = pr.Merged.Format(time.RFC3339)
+	}
+	if pr.Closed != nil {
+		closedAt = pr.Closed.Format(time.RFC3339)
+	}
+	s := md5.Sum([]byte(fmt.Sprintf("%s\x00%s\x00%s\x00%v\x00%s\x00%s\x00%s\x00%s\x00%d",
+		pr.Title, pr.Body, string(pr.State), pr.HasMerged, mergedAt, closedAt, pr.Base.Ref, pr.MergeBase, pr.Comments)))
+	return hex.EncodeToString(s[:])
+}
+
+func computeIssueContentHash(issue *gitea.Issue) string {
+	var closedAt string
+	if issue.Closed != nil {
+		closedAt = issue.Closed.Format(time.RFC3339)
+	}
+	s := md5.Sum([]byte(fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%d",
+		issue.Title, issue.Body, string(issue.State), closedAt, issue.Comments)))
+	return hex.EncodeToString(s[:])
+}
+
+func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBranch string, githubLookupRequired bool, contentHash string, giteaPullRequest *gitea.PullRequest) error {
+	entry.GitHubItemID = 0
+	var resumeEntry *itemCacheEntry
+	if cached, ok := cache.getCompletedEntry(entry.GetCacheID(), giteaPullRequest.Index); ok {
+		if cached.ContentHash == contentHash {
+			entry.Logger.Debug("skipping unchanged pull request (hash match)", "pr_number", giteaPullRequest.Index)
+			entry.GitHubItemID = cached.GitHubItemID
+			return nil
+		}
+		resumeEntry = &cached
 	}
 
 	if giteaPullRequest.MergeBase == "" {
@@ -862,7 +984,14 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 		tmpEmptyCommitRequired = true
 	}
 
-	if githubLookupRequired {
+	if resumeEntry != nil {
+		entry.Logger.Debug("fetching existing pull request by cached number", "pr_number", giteaPullRequest.Index, "github_number", resumeEntry.GitHubItemID)
+		ghPr, err := getGithubPullRequest(ctx, entry.GitHubOwner, entry.GitHubRepo, int(resumeEntry.GitHubItemID))
+		if err != nil {
+			return fmt.Errorf("retrieving pull request: %v", err)
+		}
+		githubPullRequest = ghPr
+	} else if githubLookupRequired {
 		entry.Logger.Debug("searching for any existing pull request", "pr_number", giteaPullRequest.Index)
 		sourceBranches := []string{giteaPullRequest.Head.Ref, sourceBranchForClosedOrOpenForkPullRequest}
 		branchQuery := fmt.Sprintf("head:%s", strings.Join(sourceBranches, " OR head:"))
@@ -1307,26 +1436,44 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 		}
 	}
 
-	err = entry.MigrateComments(ctx, giteaPullRequest.Index, githubPullRequest.GetNumber())
-	if err != nil {
-		return fmt.Errorf("migrating comments: %v", err)
-	}
-	cache.markCompleted(entry.GetCacheID(), giteaPullRequest.Index)
-	entry.PRSuccessCount++
-
+	entry.GitHubItemID = int64(githubPullRequest.GetNumber())
 	return nil
 }
 
-func migrateIssue(ctx context.Context, entry *migration.Entry, githubLookupRequired bool, giteaIssue *gitea.Issue) error {
-	if cache.isCompleted(entry.GetCacheID(), giteaIssue.Index) {
-		entry.Logger.Debug("skipping already completed issue", "issue_number", giteaIssue.Index)
+func migrateIssue(ctx context.Context, entry *migration.Entry, githubLookupRequired bool, contentHash string, giteaIssue *gitea.Issue) error {
+	entry.GitHubItemID = 0
+	cacheID := entry.GetCacheID()
+
+	// Phantom guard: handle before any content hash work
+	// It might be a Github-side existing PR that was later deleted on Gitea-side
+	if h.IsPhantomIssue(giteaIssue) && cache.isCompleted(cacheID, giteaIssue.Index) {
+		entry.Logger.Debug("skipping already completed phantom issue", "issue_number", giteaIssue.Index)
 		entry.IssueSuccessCount++
 		return nil
 	}
 
+	var resumeEntry *itemCacheEntry
+	if !h.IsPhantomIssue(giteaIssue) {
+		if cached, ok := cache.getCompletedEntry(cacheID, giteaIssue.Index); ok {
+			if cached.ContentHash == contentHash {
+				entry.Logger.Debug("skipping unchanged issue (hash match)", "issue_number", giteaIssue.Index)
+				entry.GitHubItemID = cached.GitHubItemID
+				return nil
+			}
+			resumeEntry = &cached
+		}
+	}
+
 	var githubIssue *github.Issue
 
-	if githubLookupRequired {
+	if resumeEntry != nil {
+		entry.Logger.Debug("fetching existing issue by cached number", "issue_number", giteaIssue.Index, "github_number", resumeEntry.GitHubItemID)
+		result, _, err := gh.Issues.Get(ctx, entry.GitHubOwner, entry.GitHubRepo, int(resumeEntry.GitHubItemID))
+		if err != nil {
+			return fmt.Errorf("retrieving issue: %v", err)
+		}
+		githubIssue = result
+	} else if githubLookupRequired {
 		entry.Logger.Debug("searching for any existing issue", "issue_number", giteaIssue.Index)
 		query := fmt.Sprintf("repo:%s/%s AND is:issue AND \"Gitea Issue Number\" \"[%d]\" in:body", entry.GitHubOwner, entry.GitHubRepo, giteaIssue.Index)
 		searchResult, err := getGithubSearchResults(ctx, query)
@@ -1358,7 +1505,7 @@ func migrateIssue(ctx context.Context, entry *migration.Entry, githubLookupRequi
 	}
 
 	originalState := ""
-	if giteaIssue.Poster.UserName == constants.PhantomItemPoster && giteaIssue.Title == constants.PhantomItemTitle && giteaIssue.Body == constants.PhantomItemBody {
+	if h.IsPhantomIssue(giteaIssue) {
 		originalState = "> This issue does not exist on Gitea. It was created to fill a gap in issue/PR ID list."
 	} else if giteaIssue.State == gitea.StateClosed {
 		originalState = "> This issue was originally **closed** on Gitea"
@@ -1460,19 +1607,6 @@ func migrateIssue(ctx context.Context, entry *migration.Entry, githubLookupRequi
 		}
 	}
 
-	if giteaIssue.Poster.UserName == constants.PhantomItemPoster && giteaIssue.Title == constants.PhantomItemTitle && giteaIssue.Body == constants.PhantomItemBody {
-		// phantom items don't exist and therefore have no comments - early exit
-		cache.markCompleted(entry.GetCacheID(), giteaIssue.Index)
-		entry.IssueSuccessCount++
-		return nil
-	}
-
-	err := entry.MigrateComments(ctx, giteaIssue.Index, githubIssue.GetNumber())
-	if err != nil {
-		return err
-	}
-
-	cache.markCompleted(entry.GetCacheID(), giteaIssue.Index)
-	entry.IssueSuccessCount++
+	entry.GitHubItemID = int64(githubIssue.GetNumber())
 	return nil
 }

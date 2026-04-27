@@ -72,3 +72,9 @@ func GetGitHubAccountReference(giteaUser *gitea.User) string {
 
 	return giteaUser.UserName
 }
+
+func IsPhantomIssue(giteaIssue *gitea.Issue) bool {
+	return giteaIssue.Poster.UserName == constants.PhantomItemPoster &&
+		giteaIssue.Title == constants.PhantomItemTitle &&
+		giteaIssue.Body == constants.PhantomItemBody
+}

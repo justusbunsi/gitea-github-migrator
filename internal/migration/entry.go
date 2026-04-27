@@ -20,6 +20,7 @@ type Entry struct {
 	PRFailureCount    int
 	IssueSuccessCount int
 	IssueFailureCount int
+	GitHubItemID      int64
 	GiteaRepository   *gitea.Repository
 	GitRepo           *git.Repository
 	giteaClient       *gitea.Client

@@ -9,6 +9,7 @@ import (
 	"code.gitea.io/sdk/gitea"
 	"github.com/google/go-github/v74/github"
 	h "github.com/justusbunsi/gitea-github-migrator/internal/helpers"
+	"github.com/justusbunsi/gitea-github-migrator/internal/migration"
 )
 
 const (
@@ -18,16 +19,36 @@ const (
 	giteaUserCacheType
 )
 
+type itemCacheEntry struct {
+	ContentHash    string
+	GitHubItemID   int64
+	CommentEntries map[int64]migration.CommentCacheEntry
+}
+
 type objectCache struct {
 	mutex     *sync.RWMutex
 	store     map[uint8]map[string]any
-	completed map[string]map[int64]struct{}
+	completed map[string]map[int64]itemCacheEntry
 	failed    map[string]map[int64]struct{}
 }
 
+type persistedCommentEntry struct {
+	GiteaCommentID  int64  `json:"gitea_id"`
+	GiteaHash       string `json:"gitea_hash"`
+	GitHubHash      string `json:"github_hash"`
+	GitHubCommentID int64  `json:"github_id"`
+}
+
+type persistedItemEntry struct {
+	GiteaID        int64                   `json:"gitea_id"`
+	ContentHash    string                  `json:"content_hash"`
+	GitHubID       int64                   `json:"github_id"`
+	CommentEntries []persistedCommentEntry `json:"comment_entries"`
+}
+
 type persistedCache struct {
-	CompletedItems map[string][]int64 `json:"completed_items"`
-	FailedItems    map[string][]int64 `json:"failed_items"`
+	CompletedItems map[string][]persistedItemEntry `json:"completed_items"`
+	FailedItems    map[string][]int64              `json:"failed_items"`
 }
 
 func newObjectCache() *objectCache {
@@ -40,7 +61,7 @@ func newObjectCache() *objectCache {
 	return &objectCache{
 		mutex:     new(sync.RWMutex),
 		store:     store,
-		completed: make(map[string]map[int64]struct{}),
+		completed: make(map[string]map[int64]itemCacheEntry),
 		failed:    make(map[string]map[int64]struct{}),
 	}
 }
@@ -55,13 +76,23 @@ func (c objectCache) isCompleted(repoKey string, index int64) bool {
 	return false
 }
 
-func (c objectCache) markCompleted(repoKey string, index int64) {
+func (c objectCache) getCompletedEntry(repoKey string, index int64) (itemCacheEntry, bool) {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	if indices, ok := c.completed[repoKey]; ok {
+		entry, done := indices[index]
+		return entry, done
+	}
+	return itemCacheEntry{}, false
+}
+
+func (c objectCache) markCompleted(repoKey string, index int64, entry itemCacheEntry) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	if _, ok := c.completed[repoKey]; !ok {
-		c.completed[repoKey] = make(map[int64]struct{})
+		c.completed[repoKey] = make(map[int64]itemCacheEntry)
 	}
-	c.completed[repoKey][index] = struct{}{}
+	c.completed[repoKey][index] = entry
 	if indices, ok := c.failed[repoKey]; ok {
 		delete(indices, index)
 	}
@@ -122,12 +153,26 @@ func (c objectCache) loadFromFile(path string) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
-	for repoKey, indices := range p.CompletedItems {
+	for repoKey, entries := range p.CompletedItems {
 		if _, ok := c.completed[repoKey]; !ok {
-			c.completed[repoKey] = make(map[int64]struct{})
+			c.completed[repoKey] = make(map[int64]itemCacheEntry)
 		}
-		for _, idx := range indices {
-			c.completed[repoKey][idx] = struct{}{}
+		for _, pe := range entries {
+			ce := itemCacheEntry{
+				ContentHash:  pe.ContentHash,
+				GitHubItemID: pe.GitHubID,
+			}
+			if len(pe.CommentEntries) > 0 {
+				ce.CommentEntries = make(map[int64]migration.CommentCacheEntry, len(pe.CommentEntries))
+				for _, pce := range pe.CommentEntries {
+					ce.CommentEntries[pce.GiteaCommentID] = migration.CommentCacheEntry{
+						GiteaHash:       pce.GiteaHash,
+						GitHubHash:      pce.GitHubHash,
+						GitHubCommentID: pce.GitHubCommentID,
+					}
+				}
+			}
+			c.completed[repoKey][pe.GiteaID] = ce
 		}
 	}
 	for repoKey, indices := range p.FailedItems {
@@ -147,14 +192,30 @@ func (c objectCache) saveToFile(path string) error {
 	defer c.mutex.RUnlock()
 
 	p := persistedCache{
-		CompletedItems: make(map[string][]int64),
+		CompletedItems: make(map[string][]persistedItemEntry),
 		FailedItems:    make(map[string][]int64),
 	}
 
-	for repoKey, indices := range c.completed {
-		list := make([]int64, 0, len(indices))
-		for idx := range indices {
-			list = append(list, idx)
+	for repoKey, entries := range c.completed {
+		list := make([]persistedItemEntry, 0, len(entries))
+		for idx, entry := range entries {
+			pe := persistedItemEntry{
+				GiteaID:     idx,
+				ContentHash: entry.ContentHash,
+				GitHubID:    entry.GitHubItemID,
+			}
+			if len(entry.CommentEntries) > 0 {
+				pe.CommentEntries = make([]persistedCommentEntry, 0, len(entry.CommentEntries))
+				for commentID, ce := range entry.CommentEntries {
+					pe.CommentEntries = append(pe.CommentEntries, persistedCommentEntry{
+						GiteaCommentID:  commentID,
+						GiteaHash:       ce.GiteaHash,
+						GitHubHash:      ce.GitHubHash,
+						GitHubCommentID: ce.GitHubCommentID,
+					})
+				}
+			}
+			list = append(list, pe)
 		}
 		p.CompletedItems[repoKey] = list
 	}
