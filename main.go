@@ -41,8 +41,7 @@ import (
 var loop, report bool
 var deleteExistingRepos, enablePullRequests, enableIssues, enableReleases, renameMasterToMain bool
 var githubDomain, githubRepo, githubToken, giteaDomain, giteaProject, giteaToken, projectsCsvPath, renameTrunkBranch, cacheFilePath string
-var githubAppID, githubAppPrivateKeyFile string
-var githubAppInstallationID int64
+var githubAppID, githubAppInstallationID, githubAppPrivateKeyFile string
 
 var (
 	cache             *objectCache
@@ -194,23 +193,11 @@ func main() {
 	flag.IntVar(&maxConcurrency, "max-concurrency", 4, "how many projects to migrate in parallel")
 	flag.StringVar(&cacheFilePath, "cache-file", "", "path to a JSON file for persisting the cache across runs (enables faster and cheaper resumability)")
 
-	flag.StringVar(&githubAppID, "github-app-id", "", "GitHub App ID for app-based authentication (alternative to GITHUB_TOKEN)")
-	flag.Int64Var(&githubAppInstallationID, "github-app-installation-id", 0, "GitHub App installation ID")
+	flag.StringVar(&githubAppID, "github-app-id", "", "path to a file containing the GitHub App ID (for app-based authentication, alternative to GITHUB_TOKEN)")
+	flag.StringVar(&githubAppInstallationID, "github-app-installation-id", "", "path to a file containing the GitHub App installation ID")
 	flag.StringVar(&githubAppPrivateKeyFile, "github-app-private-key", "", "path to the GitHub App private key PEM file")
 
 	flag.Parse()
-
-	githubToken = os.Getenv("GITHUB_TOKEN")
-	usingAppAuth := githubAppID != "" || githubAppInstallationID != 0 || githubAppPrivateKeyFile != ""
-	if usingAppAuth {
-		if githubAppID == "" || githubAppInstallationID == 0 || githubAppPrivateKeyFile == "" {
-			logger.Error("must specify all of -github-app-id, -github-app-installation-id, and -github-app-private-key together")
-			os.Exit(1)
-		}
-	} else if githubToken == "" {
-		logger.Error("must set GITHUB_TOKEN or provide all GitHub App authentication flags")
-		os.Exit(1)
-	}
 
 	repoSpecifiedInline := githubRepo != "" && giteaProject != ""
 	if (githubRepo != "" || giteaProject != "") && projectsCsvPath != "" {
@@ -261,16 +248,42 @@ func main() {
 	ghCfg := github_client.Config{
 		Domain: githubDomain,
 	}
+	githubToken = os.Getenv("GITHUB_TOKEN")
+	usingAppAuth := githubAppID != "" || githubAppInstallationID != "" || githubAppPrivateKeyFile != ""
+
 	if usingAppAuth {
+		if githubAppID == "" || githubAppInstallationID == "" || githubAppPrivateKeyFile == "" {
+			logger.Error("must specify all of -github-app-id, -github-app-installation-id, and -github-app-private-key together")
+			os.Exit(1)
+		}
+		appIDData, err := os.ReadFile(githubAppID)
+		if err != nil {
+			logger.Error("failed to read GitHub App ID file", "path", githubAppID, "error", err)
+			os.Exit(1)
+		}
 		privateKeyBytes, err := os.ReadFile(githubAppPrivateKeyFile)
 		if err != nil {
 			logger.Error("failed to read GitHub App private key", "path", githubAppPrivateKeyFile, "error", err)
 			os.Exit(1)
 		}
-		ghCfg.AppID = githubAppID
-		ghCfg.AppInstallationID = githubAppInstallationID
+		installationIDData, err := os.ReadFile(githubAppInstallationID)
+		if err != nil {
+			logger.Error("failed to read GitHub App installation ID file", "path", githubAppInstallationID, "error", err)
+			os.Exit(1)
+		}
+		installationID, err := strconv.ParseInt(strings.TrimSpace(string(installationIDData)), 10, 64)
+		if err != nil {
+			logger.Error("invalid GitHub App installation ID in file", "path", githubAppInstallationID, "error", err)
+			os.Exit(1)
+		}
+		ghCfg.AppID = strings.TrimSpace(string(appIDData))
+		ghCfg.AppInstallationID = installationID
 		ghCfg.AppPrivateKey = privateKeyBytes
 	} else {
+		if githubToken == "" {
+			logger.Error("must set GITHUB_TOKEN or provide all GitHub App authentication flags")
+			os.Exit(1)
+		}
 		ghCfg.Token = githubToken
 	}
 	if gh, getGithubGitToken, err = github_client.New(ctx, ghCfg, logger); err != nil {
