@@ -1527,10 +1527,12 @@ func migrateIssue(ctx context.Context, entry *migration.Entry, githubLookupRequi
 
 	// Phantom guard: handle before any content hash work
 	// It might be a Github-side existing PR that was later deleted on Gitea-side
-	if h.IsPhantomIssue(giteaIssue) && cache.isCompleted(cacheID, giteaIssue.Index) {
-		entry.Logger.Debug("skipping already completed phantom issue", "issue_number", giteaIssue.Index)
-		entry.IssueSuccessCount++
-		return nil
+	if h.IsPhantomIssue(giteaIssue) {
+		if cached, ok := cache.getCompletedEntry(cacheID, giteaIssue.Index); ok {
+			entry.Logger.Debug("skipping already completed phantom issue", "issue_number", giteaIssue.Index)
+			entry.GitHubItemID = cached.GitHubItemID
+			return nil
+		}
 	}
 
 	var resumeEntry *itemCacheEntry
