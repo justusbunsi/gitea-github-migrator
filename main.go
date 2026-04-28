@@ -1775,13 +1775,35 @@ func migrateRelease(ctx context.Context, entry *migration.Entry, giteaRelease *g
 		}
 		githubRelease = r
 	} else {
-		entry.Logger.Debug("looking up existing release by tag", "tag", giteaRelease.TagName)
-		r, resp, err := gh.Repositories.GetReleaseByTag(ctx, entry.GitHubOwner, entry.GitHubRepo, giteaRelease.TagName)
-		if err != nil && (resp == nil || resp.StatusCode != http.StatusNotFound) {
-			return fmt.Errorf("looking up release by tag: %v", err)
-		}
-		if err == nil {
-			githubRelease = r
+		if giteaRelease.IsDraft {
+			// GetReleaseByTag does not return draft releases; list all releases and match by tag name.
+			entry.Logger.Debug("looking up existing draft release by tag name", "tag", giteaRelease.TagName)
+			opts := &github.ListOptions{PerPage: 100}
+			for {
+				releases, resp, err := gh.Repositories.ListReleases(ctx, entry.GitHubOwner, entry.GitHubRepo, opts)
+				if err != nil {
+					return fmt.Errorf("listing releases to find draft: %v", err)
+				}
+				for _, r := range releases {
+					if r.GetTagName() == giteaRelease.TagName {
+						githubRelease = r
+						break
+					}
+				}
+				if githubRelease != nil || resp.NextPage == 0 {
+					break
+				}
+				opts.Page = resp.NextPage
+			}
+		} else {
+			entry.Logger.Debug("looking up existing release by tag", "tag", giteaRelease.TagName)
+			r, resp, err := gh.Repositories.GetReleaseByTag(ctx, entry.GitHubOwner, entry.GitHubRepo, giteaRelease.TagName)
+			if err != nil && (resp == nil || resp.StatusCode != http.StatusNotFound) {
+				return fmt.Errorf("looking up release by tag: %v", err)
+			}
+			if err == nil {
+				githubRelease = r
+			}
 		}
 	}
 
