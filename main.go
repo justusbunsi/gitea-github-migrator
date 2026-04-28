@@ -772,27 +772,25 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 					entry.Logger.Error("stop migration due to error to prevent ID mismatch")
 					break
 				}
-				if entry.GitHubItemID > 0 {
-					var commentEntries map[int64]migration.CommentCacheEntry
-					if cached, ok := cache.getCompletedEntry(cacheID, giteaPullRequests[idx].Index); ok {
-						commentEntries = cached.CommentEntries
-					}
-					commentEntries, err = entry.MigrateComments(ctx, giteaPullRequests[idx].Index, entry.GitHubItemID, commentEntries)
-					if err != nil {
-						cache.markFailed(cacheID, giteaPullRequests[idx].Index)
-						sendErr(fmt.Errorf("migrating comments: %v", err))
-						entry.PRFailureCount++
-						// fail-fast
-						entry.Logger.Error("stop migration due to error to prevent ID mismatch")
-						break
-					}
-					cache.markCompleted(cacheID, giteaPullRequests[idx].Index, itemCacheEntry{
-						ContentHash:    prHash,
-						GitHubItemID:   entry.GitHubItemID,
-						CommentEntries: commentEntries,
-					})
-					entry.PRSuccessCount++
+				var commentEntries map[int64]migration.CommentCacheEntry
+				if cached, ok := cache.getCompletedEntry(cacheID, giteaPullRequests[idx].Index); ok {
+					commentEntries = cached.CommentEntries
 				}
+				commentEntries, err = entry.MigrateComments(ctx, giteaPullRequests[idx].Index, entry.GitHubItemID, commentEntries)
+				if err != nil {
+					cache.markFailed(cacheID, giteaPullRequests[idx].Index)
+					sendErr(fmt.Errorf("migrating comments: %v", err))
+					entry.PRFailureCount++
+					// fail-fast
+					entry.Logger.Error("stop migration due to error to prevent ID mismatch")
+					break
+				}
+				cache.markCompleted(cacheID, giteaPullRequests[idx].Index, itemCacheEntry{
+					ContentHash:    prHash,
+					GitHubItemID:   entry.GitHubItemID,
+					CommentEntries: commentEntries,
+				})
+				entry.PRSuccessCount++
 			} else {
 				issueHash := computeIssueContentHash(giteaItem)
 				err := migrateIssue(ctx, entry, githubLookupRequired(giteaItem.Index), issueHash, giteaItem)
@@ -1105,6 +1103,11 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 						skip = true
 						break
 					}
+					if ghPr.GetNumber() == 0 {
+						sendErr(fmt.Errorf("retrieving pull request: GitHub returned ID 0"))
+						skip = true
+						break
+					}
 
 					if strings.Contains(ghPr.GetBody(), fmt.Sprintf("**Gitea PR Number** | [%d]", giteaPullRequest.Index)) {
 						entry.Logger.Debug("found existing pull request", "pr_number", ghPr.GetNumber())
@@ -1371,6 +1374,9 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 		if githubPullRequest, _, err = gh.PullRequests.Create(ctx, entry.GitHubOwner, entry.GitHubRepo, &newPullRequest); err != nil {
 			return fmt.Errorf("creating pull request: %v", err)
 		}
+		if githubPullRequest.GetNumber() == 0 {
+			return fmt.Errorf("creating pull request: GitHub returned ID 0")
+		}
 		if err := h.SleepWithContext(ctx, constants.GithubApiPauseBetweenMutativeRequests); err != nil {
 			return err
 		}
@@ -1517,6 +1523,9 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 		}
 	}
 
+	if githubPullRequest.GetNumber() == 0 {
+		return fmt.Errorf("pull request %d: GitHub returned ID 0", giteaPullRequest.Index)
+	}
 	entry.GitHubItemID = int64(githubPullRequest.GetNumber())
 	return nil
 }
@@ -1641,6 +1650,9 @@ func migrateIssue(ctx context.Context, entry *migration.Entry, githubLookupRequi
 		if err != nil {
 			return fmt.Errorf("creating issue: %v", err)
 		}
+		if createdIssue.GetNumber() == 0 {
+			return fmt.Errorf("creating issue: GitHub returned ID 0")
+		}
 		githubIssue = createdIssue
 		if err := h.SleepWithContext(ctx, constants.GithubApiPauseBetweenMutativeRequests); err != nil {
 			return err
@@ -1690,6 +1702,9 @@ func migrateIssue(ctx context.Context, entry *migration.Entry, githubLookupRequi
 		}
 	}
 
+	if githubIssue.GetNumber() == 0 {
+		return fmt.Errorf("issue %d: GitHub returned ID 0", giteaIssue.Index)
+	}
 	entry.GitHubItemID = int64(githubIssue.GetNumber())
 	return nil
 }
@@ -1821,6 +1836,9 @@ func migrateRelease(ctx context.Context, entry *migration.Entry, giteaRelease *g
 		if err != nil {
 			return fmt.Errorf("creating release: %v", err)
 		}
+		if r.GetID() == 0 {
+			return fmt.Errorf("creating release: GitHub returned ID 0")
+		}
 		if err := h.SleepWithContext(ctx, constants.GithubApiPauseBetweenMutativeRequests); err != nil {
 			return err
 		}
@@ -1852,6 +1870,9 @@ func migrateRelease(ctx context.Context, entry *migration.Entry, giteaRelease *g
 		}
 	}
 
+	if githubRelease.GetID() == 0 {
+		return fmt.Errorf("release %q: GitHub returned ID 0", giteaRelease.TagName)
+	}
 	entry.GitHubReleaseID = githubRelease.GetID()
 	return nil
 }

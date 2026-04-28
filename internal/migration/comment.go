@@ -89,10 +89,6 @@ func (e *Entry) MigrateComments(ctx context.Context, giteaItemId int64, githubIt
 		return commentEntries, nil
 	}
 
-	if githubItemId == 0 {
-		return nil, fmt.Errorf("GitHub item id is 0 and would cause the API to retrieve all comments across the repository - leading to high rate limit burning")
-	}
-
 	// cache-file mode (on migration resume): use cached GitHubCommentID for direct updates — no GitHub comment list fetch.
 	if len(commentEntries) > 0 {
 		for _, comment := range giteaComments {
@@ -126,6 +122,9 @@ func (e *Entry) MigrateComments(ctx context.Context, giteaItemId int64, githubIt
 			created, _, err := e.githubClient.Issues.CreateComment(ctx, e.GitHubOwner, e.GitHubRepo, int(githubItemId), &github.IssueComment{Body: &commentBody})
 			if err != nil {
 				return nil, fmt.Errorf("creating comment for gitea item #%d (#%d): %v", giteaItemId, githubItemId, err)
+			}
+			if created.GetID() == 0 {
+				return nil, fmt.Errorf("creating comment for gitea item #%d (#%d): GitHub returned ID 0", giteaItemId, githubItemId)
 			}
 			if err := h.SleepWithContext(ctx, constants.GithubApiPauseBetweenMutativeRequests); err != nil {
 				return nil, err
@@ -176,6 +175,9 @@ func (e *Entry) MigrateComments(ctx context.Context, giteaItemId int64, githubIt
 				} else {
 					e.Logger.Trace("existing comment is up-to-date", "gitea_item", giteaItemId, "github_item", githubItemId, "comment_id", comment.ID, "comment_id", githubComment.GetID())
 				}
+				if githubComment.GetID() == 0 {
+					return nil, fmt.Errorf("comment %d on gitea item #%d: GitHub returned ID 0", comment.ID, giteaItemId)
+				}
 				commentEntries[comment.ID] = CommentCacheEntry{GiteaHash: giteaHash, GitHubHash: githubHash, GitHubCommentID: githubComment.GetID()}
 				break
 			}
@@ -186,6 +188,9 @@ func (e *Entry) MigrateComments(ctx context.Context, giteaItemId int64, githubIt
 			created, _, err := e.githubClient.Issues.CreateComment(ctx, e.GitHubOwner, e.GitHubRepo, int(githubItemId), &github.IssueComment{Body: &commentBody})
 			if err != nil {
 				return nil, fmt.Errorf("creating comment for gitea item #%d (#%d): %v", giteaItemId, githubItemId, err)
+			}
+			if created.GetID() == 0 {
+				return nil, fmt.Errorf("creating comment for gitea item #%d (#%d): GitHub returned ID 0", giteaItemId, githubItemId)
 			}
 			if err = h.SleepWithContext(ctx, constants.GithubApiPauseBetweenMutativeRequests); err != nil {
 				return nil, err
