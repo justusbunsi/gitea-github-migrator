@@ -1,0 +1,6 @@
+**
+!go.*
+!internal/
+!main.go
+!cache.go
+!helper.go
