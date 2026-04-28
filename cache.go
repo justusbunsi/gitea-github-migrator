@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"slices"
 	"sync"
 
 	"code.gitea.io/sdk/gitea"
@@ -306,9 +307,11 @@ func (c objectCache) saveToFile(path string) error {
 						GitHubCommentID: ce.GitHubCommentID,
 					})
 				}
+				slices.SortFunc(pe.CommentEntries, func(a, b persistedCommentEntry) int { return int(a.GiteaCommentID - b.GiteaCommentID) })
 			}
 			list = append(list, pe)
 		}
+		slices.SortFunc(list, func(a, b persistedItemEntry) int { return int(a.GiteaID - b.GiteaID) })
 		p.CompletedItems[repoKey] = list
 	}
 	for repoKey, indices := range c.failed {
@@ -316,6 +319,7 @@ func (c objectCache) saveToFile(path string) error {
 		for idx := range indices {
 			list = append(list, idx)
 		}
+		slices.Sort(list)
 		p.FailedItems[repoKey] = list
 	}
 
@@ -328,6 +332,7 @@ func (c objectCache) saveToFile(path string) error {
 				GitHubReleaseID: entry.GitHubReleaseID,
 			})
 		}
+		slices.SortFunc(list, func(a, b persistedReleaseEntry) int { return int(a.GiteaID - b.GiteaID) })
 		p.CompletedReleases[repoKey] = list
 	}
 	for repoKey, indices := range c.failedReleases {
@@ -335,6 +340,7 @@ func (c objectCache) saveToFile(path string) error {
 		for idx := range indices {
 			list = append(list, idx)
 		}
+		slices.Sort(list)
 		p.FailedReleases[repoKey] = list
 	}
 
