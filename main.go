@@ -1075,7 +1075,6 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 		}
 
 		// Look for an existing GitHub pull request
-		skip := false
 		for _, issue := range searchResult.Issues {
 			if issue == nil {
 				continue
@@ -1090,23 +1089,17 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 				// Extract the PR number from the URL
 				prUrl, err := url.Parse(*issue.PullRequestLinks.URL)
 				if err != nil {
-					sendErr(fmt.Errorf("parsing pull request url: %v", err))
-					skip = true
-					break
+					return fmt.Errorf("parsing pull request url: %v", err)
 				}
 
 				if m := regexp.MustCompile(".+/([0-9]+)$").FindStringSubmatch(prUrl.Path); len(m) == 2 {
 					prNumber, _ := strconv.Atoi(m[1])
 					ghPr, err := getGithubPullRequest(ctx, entry.GitHubOwner, entry.GitHubRepo, prNumber)
 					if err != nil {
-						sendErr(fmt.Errorf("retrieving pull request: %v", err))
-						skip = true
-						break
+						return fmt.Errorf("retrieving pull request: %v", err)
 					}
 					if ghPr.GetNumber() == 0 {
-						sendErr(fmt.Errorf("retrieving pull request: GitHub returned ID 0"))
-						skip = true
-						break
+						return fmt.Errorf("retrieving pull request: GitHub returned ID 0")
 					}
 
 					if strings.Contains(ghPr.GetBody(), fmt.Sprintf("**Gitea PR Number** | [%d]", giteaPullRequest.Index)) {
@@ -1116,9 +1109,6 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 					}
 				}
 			}
-		}
-		if skip {
-			return nil
 		}
 	}
 
