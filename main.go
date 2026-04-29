@@ -517,6 +517,7 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 	var createRepo, repoDeleted bool
 	if err != nil {
 		createRepo = true
+		cache.purgeRepo(entry.GetCacheID())
 	} else if deleteExistingRepos {
 		entry.Logger.Warn("existing repository was found on GitHub, proceeding to delete")
 		if _, err = gh.Repositories.Delete(ctx, entry.GitHubOwner, entry.GitHubRepo); err != nil {
