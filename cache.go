@@ -116,13 +116,27 @@ func (c objectCache) markCompleted(repoKey string, index int64, entry itemCacheE
 	}
 }
 
+func (c objectCache) markRepoKnown(repoKey string) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	if _, ok := c.completed[repoKey]; !ok {
+		c.completed[repoKey] = make(map[int64]itemCacheEntry)
+	}
+}
+
 func (c objectCache) isKnownRepo(repoKey string) bool {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-	if indices, ok := c.completed[repoKey]; ok && len(indices) > 0 {
+	if _, ok := c.completed[repoKey]; ok {
 		return true
 	}
-	if indices, ok := c.failed[repoKey]; ok && len(indices) > 0 {
+	if _, ok := c.failed[repoKey]; ok {
+		return true
+	}
+	if _, ok := c.completedReleases[repoKey]; ok {
+		return true
+	}
+	if _, ok := c.failedReleases[repoKey]; ok {
 		return true
 	}
 	return false

@@ -534,8 +534,8 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 	// even reached. The cache stores that point directly, skipping the searches entirely.
 	//
 	// repoKnownInCache controls whether the cache is trustworthy for this repository.
-	// It is only true when a cache file is in use AND the repo has entries in it, meaning a
-	// previous cache-backed run already started migrating it. This is the prerequisite for
+	// It is only true when a cache file is in use AND the repo has been registered in it, meaning a
+	// previous cache-backed run already reached the GitHub repo creation step. This is the prerequisite for
 	// skipping the GitHub search on resume: items that were completed are skipped entirely;
 	// items that previously failed still trigger a search to avoid duplicates.
 	//
@@ -583,6 +583,10 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 		if _, _, err = gh.Repositories.Create(ctx, org, &newRepo); err != nil {
 			return fmt.Errorf("creating github repo: %v", err)
 		}
+	}
+
+	if cacheFilePath != "" {
+		cache.markRepoKnown(entry.GetCacheID())
 	}
 
 	entry.Logger.Debug("updating repository settings")
