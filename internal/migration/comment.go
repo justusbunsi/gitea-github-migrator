@@ -82,12 +82,12 @@ func (e *Entry) MigrateComments(ctx context.Context, giteaItemId int64, githubIt
 		opts.Page = resp.NextPage
 	}
 
-	e.Logger.Info("migrating comments from Gitea to GitHub", "item_id", githubItemId, "count", len(giteaComments))
-
 	if len(giteaComments) == 0 {
 		// We don't need to request GitHub API if there are no comments to be migrated at all. Those secondary rate limit points can be safed.
 		return commentEntries, nil
 	}
+
+	e.Logger.Info("migrating comments from Gitea to GitHub", "item_id", githubItemId, "count", len(giteaComments))
 
 	// cache-file mode (on migration resume): use cached GitHubCommentID for direct updates — no GitHub comment list fetch.
 	if len(commentEntries) > 0 {
