@@ -70,6 +70,8 @@ github.com/jferrl/go-githubauth v1.6.0 h1:By+4kqdNPhvizKztD1uVbwk3cp2o9bNIVATZ9o
 github.com/jferrl/go-githubauth v1.6.0/go.mod h1:JfSoHpcaY93/UduD45AY15pLgkcE1LnsZfH+Gqf/TBI=
 github.com/justusbunsi/progress-bar v1.0.2 h1:P6k3lGK4ZZp3iN82NsdQZfP/glI87QX5BT1UfTxkXZU=
 github.com/justusbunsi/progress-bar v1.0.2/go.mod h1:v5vr7zyZGgYG2b7nYRUOyuxLcvVEBDdMFAb/KfKOgEI=
+github.com/justusbunsi/progress-bar v1.0.3 h1:CbNEXtUzQTckl2hnpqvWqDUTqhGLWVungY7xAbTCTzE=
+github.com/justusbunsi/progress-bar v1.0.3/go.mod h1:v5vr7zyZGgYG2b7nYRUOyuxLcvVEBDdMFAb/KfKOgEI=
 github.com/kevinburke/ssh_config v1.6.0 h1:J1FBfmuVosPHf5GRdltRLhPJtJpTlMdKTBjRgTaQBFY=
 github.com/kevinburke/ssh_config v1.6.0/go.mod h1:q2RIzfka+BXARoNexmF9gkxEX7DmvbW9P4hIVx2Kg4M=
 github.com/klauspost/cpuid/v2 v2.3.0 h1:S4CRMLnYUhGeDFDqkGriYKdfoFlDnMtqTiI/sFzhA9Y=

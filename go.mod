@@ -12,7 +12,7 @@ require (
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/go-retryablehttp v0.7.8
 	github.com/jferrl/go-githubauth v1.6.0
-	github.com/justusbunsi/progress-bar v1.0.2
+	github.com/justusbunsi/progress-bar v1.0.3
 	golang.org/x/oauth2 v0.36.0
 )
 
