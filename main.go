@@ -785,6 +785,14 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 					entry.Logger.Error("stop migration due to error to prevent ID mismatch")
 					break
 				}
+				if giteaPullRequests[idx].Index != entry.GitHubItemID {
+					cache.markFailed(cacheID, giteaPullRequests[idx].Index)
+					sendErr(fmt.Errorf("migrating comments: %v", err))
+					entry.PRFailureCount++
+					// fail-fast
+					entry.Logger.Error("mismatch between Gitea item ID and generated GitHub item ID detected. Stop migration to prevent further ID mismatch. Needs manual investigation and re-doing whole migration.")
+					break
+				}
 				cache.markCompleted(cacheID, giteaPullRequests[idx].Index, itemCacheEntry{
 					ContentHash:    prHash,
 					GitHubItemID:   entry.GitHubItemID,
@@ -800,6 +808,14 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 					entry.IssueFailureCount++
 					// fail-fast
 					entry.Logger.Error("stop migration due to error to prevent ID mismatch")
+					break
+				}
+				if giteaItem.Index != entry.GitHubItemID {
+					cache.markFailed(cacheID, giteaItem.Index)
+					sendErr(fmt.Errorf("migrating comments: %v", err))
+					entry.IssueFailureCount++
+					// fail-fast
+					entry.Logger.Error("mismatch between Gitea item ID and generated GitHub item ID detected. Stop migration to prevent further ID mismatch. Needs manual investigation and re-doing whole migration.")
 					break
 				}
 				if h.IsPhantomIssue(giteaItem) {
