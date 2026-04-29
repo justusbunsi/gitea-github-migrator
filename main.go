@@ -550,7 +550,7 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 		return !createRepo && (!repoKnownInCache || cache.isFailed(entry.GetCacheID(), index))
 	}
 
-	if cacheFilePath != "" && !createRepo && !repoKnownInCache && (enableIssues || enablePullRequests) {
+	if cacheFilePath != "" && !createRepo && !repoKnownInCache && (enableIssues || enablePullRequests || enableReleases) {
 		return fmt.Errorf("repository %s/%s already exists on GitHub but is not tracked in cache; use -delete-existing-repos to recreate it or provide a cache file from a previous run of this repository or do not use -cache-file entirely", entry.GitHubOwner, entry.GitHubRepo)
 	}
 
