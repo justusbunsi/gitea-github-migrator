@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -22,12 +23,17 @@ import (
 	"time"
 
 	"code.gitea.io/sdk/gitea"
+	"github.com/go-git/go-billy/v5"
 	"github.com/go-git/go-billy/v5/memfs"
+	"github.com/go-git/go-billy/v5/osfs"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
+	gitcache "github.com/go-git/go-git/v5/plumbing/cache"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/transport"
+	"github.com/go-git/go-git/v5/storage"
+	"github.com/go-git/go-git/v5/storage/filesystem"
 	"github.com/go-git/go-git/v5/storage/memory"
 	"github.com/google/go-github/v74/github"
 	"github.com/hashicorp/go-hclog"
@@ -39,7 +45,7 @@ import (
 	"github.com/justusbunsi/progress-bar/progressbar"
 )
 
-var loop, report bool
+var loop, report, reposOnDisk bool
 var deleteExistingRepos, enablePullRequests, enableIssues, enableReleases, renameMasterToMain bool
 var githubDomain, githubRepo, githubToken, giteaDomain, giteaProject, giteaToken, projectsCsvPath, renameTrunkBranch, cacheFilePath string
 var githubAppID, githubAppInstallationID, githubAppPrivateKeyFile string
@@ -177,6 +183,7 @@ func main() {
 
 	flag.BoolVar(&loop, "loop", false, "continue migrating until canceled")
 	flag.BoolVar(&report, "report", false, "report on primitives to be migrated instead of beginning migration")
+	flag.BoolVar(&reposOnDisk, "repos-on-disk", false, "clone repositories to a temporary directory on disk instead of in-memory (reduces RAM usage for large repositories at the cost of disk I/O)")
 
 	flag.BoolVar(&deleteExistingRepos, "delete-existing-repos", false, "whether existing repositories should be deleted before migrating")
 	flag.BoolVar(&enablePullRequests, "migrate-pull-requests", false, "whether pull requests should be migrated")
@@ -609,11 +616,31 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 	cloneUrl.User = url.UserPassword("oauth2", giteaToken)
 	cloneUrlWithCredentials := cloneUrl.String()
 
-	// In-memory filesystem for worktree operations
-	fs := memfs.New()
-
 	entry.Logger.Debug("cloning repository", "url", entry.GiteaRepository.CloneURL)
-	entry.GitRepo, err = git.CloneContext(ctx, memory.NewStorage(), fs, &git.CloneOptions{
+	var cloneStore storage.Storer
+	var cloneFS billy.Filesystem
+	if reposOnDisk {
+		var tmpDir string
+		tmpDir, err = os.MkdirTemp("", "gitea-mirror-*")
+		if err != nil {
+			return fmt.Errorf("creating temp dir for disk-backed clone: %v", err)
+		}
+		fsStore := filesystem.NewStorage(osfs.New(filepath.Join(tmpDir, ".git")), gitcache.NewObjectLRUDefault())
+		defer func() {
+			if closeErr := fsStore.Close(); closeErr != nil {
+				entry.Logger.Error("failed to close filesystem storage", "error", closeErr)
+			}
+			if removeErr := os.RemoveAll(tmpDir); removeErr != nil {
+				entry.Logger.Error("failed to remove temporary clone directory", "path", tmpDir, "error", removeErr)
+			}
+		}()
+		cloneStore = fsStore
+		cloneFS = osfs.New(tmpDir)
+	} else {
+		cloneStore = memory.NewStorage()
+		cloneFS = memfs.New()
+	}
+	entry.GitRepo, err = git.CloneContext(ctx, cloneStore, cloneFS, &git.CloneOptions{
 		URL:        cloneUrlWithCredentials,
 		Auth:       nil,
 		RemoteName: "gitea",

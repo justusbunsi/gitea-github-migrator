@@ -65,6 +65,8 @@ Written in Go, this is a cross-platform CLI utility that accepts the following r
         specifies the new trunk branch name (incompatible with -rename-master-to-main)
   -report
         report on primitives to be migrated instead of beginning migration
+  -repos-on-disk
+        clone repositories to a temporary directory on disk instead of in-memory (reduces RAM usage for large repositories at the cost of disk I/O)
   -cache-file string
         The cache file allows non-loop runs to resume after an unhandled error efficiently.
         Without it a resume still works correctly - the GitHub Search API identifies what
@@ -111,6 +113,8 @@ As a bonus, this tool can transparently rename the trunk branch on your GitHub r
 By default, 4 workers will be spawned to migrate up to 4 projects in parallel. You can increase or decrease this with the `-max-concurrency` argument. Note that due to GitHub API rate-limiting, you may not experience any significant speed-up. See [GitHub API docs](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api) for details.
 
 Specify `-loop` to continue migrating projects until canceled. This is useful for daemonizing the migration tool, or automatically restarting when migrating a large number of projects (or a small number of very large projects).
+
+For large repositories, go-git's in-memory object store can cause OOM kills. Pass `-repos-on-disk` to clone each repository into a temporary directory instead. The directory is always deleted once migration of that repository completes, regardless of success or failure. Disk space required is roughly proportional to the uncompressed size of the repository's git objects.
 
 ## Logging
 
