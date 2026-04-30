@@ -1186,6 +1186,14 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 	if len(bases) == 0 {
 		entry.Logger.Trace("orphaned head commit detected", "pr_number", giteaPullRequest.Index, "sha", prHeadHash)
 		tmpEmptyCommitRequired = true
+	} else {
+		for _, base := range bases {
+			if base.Hash == prHeadHash {
+				entry.Logger.Debug("pull request head is ancestor of merge base, treating as empty commit PR", "pr_number", giteaPullRequest.Index)
+				tmpEmptyCommitRequired = true
+				break
+			}
+		}
 	}
 
 	if githubPullRequest == nil {
