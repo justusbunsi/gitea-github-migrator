@@ -41,13 +41,16 @@ func (e *Entry) buildCommentBody(comment *gitea.Comment, giteaItemId int64, gith
 
 // MigrateComments migrates comments from a Gitea item to the corresponding GitHub item.
 //
-// commentEntries is the cached map of Gitea comment ID → CommentCacheEntry.
 // When non-empty (cache-file mode) each comment is compared by GiteaHash and GitHubHash and updated in-place via its cached GitHub ID,
 // avoiding a full GitHub comment list fetch.
 // When empty (non cache-file mode) the existing GitHub comments are fetched and matched by body content, populating the map for future runs.
 //
 // The returned map is the updated commentEntries and must be persisted by the caller.
-func (e *Entry) MigrateComments(ctx context.Context, giteaItemId int64, githubItemId int64, commentEntries map[int64]cache.CommentCacheEntry) (map[int64]cache.CommentCacheEntry, error) {
+func (e *Entry) MigrateComments(ctx context.Context, giteaItemId int64, githubItemId int64) (map[int64]cache.CommentCacheEntry, error) {
+	var commentEntries map[int64]cache.CommentCacheEntry
+	if cached, ok := e.Cache.GetCompletedEntry(e.GetCacheID(), giteaItemId); ok {
+		commentEntries = cached.CommentEntries
+	}
 	if commentEntries == nil {
 		commentEntries = make(map[int64]cache.CommentCacheEntry)
 	}
@@ -83,7 +86,7 @@ func (e *Entry) MigrateComments(ctx context.Context, giteaItemId int64, githubIt
 
 	e.Logger.Info("migrating comments from Gitea to GitHub", "item_id", githubItemId, "count", len(giteaComments))
 
-	// cache-file mode (on migration resume): use cached GitHubCommentID for direct updates — no GitHub comment list fetch.
+	// cache-file mode (on migration resume): use cached GitHubCommentID for direct updates - no GitHub comment list fetch.
 	if len(commentEntries) > 0 {
 		for _, comment := range giteaComments {
 			if comment == nil {

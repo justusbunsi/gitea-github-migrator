@@ -386,7 +386,7 @@ func printReport(ctx context.Context, projects []Project) {
 }
 
 func reportProject(ctx context.Context, proj []string) (*Report, error) {
-	entry, err := migration.NewEntry(proj[0], proj[1], gi, gh, logger)
+	entry, err := migration.NewEntry(proj[0], proj[1], gi, gh, logger, appCache)
 	if err != nil {
 		return nil, err
 	}
@@ -491,7 +491,7 @@ func performMigration(ctx context.Context, projects []Project) error {
 }
 
 func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) error {
-	entry, err := migration.NewEntry(proj[0], proj[1], gi, gh, logger)
+	entry, err := migration.NewEntry(proj[0], proj[1], gi, gh, logger, appCache)
 	if err != nil {
 		return err
 	}
@@ -806,11 +806,7 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 					entry.Logger.Error("stop migration due to error to prevent ID mismatch")
 					break
 				}
-				var commentEntries map[int64]cache.CommentCacheEntry
-				if cached, ok := appCache.GetCompletedEntry(cacheID, giteaPullRequests[idx].Index); ok {
-					commentEntries = cached.CommentEntries
-				}
-				commentEntries, err = entry.MigrateComments(ctx, giteaPullRequests[idx].Index, entry.GitHubItemID, commentEntries)
+				commentEntries, err := entry.MigrateComments(ctx, giteaPullRequests[idx].Index, entry.GitHubItemID)
 				if err != nil {
 					appCache.MarkFailed(cacheID, giteaPullRequests[idx].Index)
 					sendErr(fmt.Errorf("migrating comments: %v", err))
@@ -861,11 +857,7 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 					continue
 				}
 				// always migrate comments to update if necessary
-				var commentEntries map[int64]cache.CommentCacheEntry
-				if cached, ok := appCache.GetCompletedEntry(cacheID, giteaItem.Index); ok {
-					commentEntries = cached.CommentEntries
-				}
-				commentEntries, err = entry.MigrateComments(ctx, giteaItem.Index, entry.GitHubItemID, commentEntries)
+				commentEntries, err := entry.MigrateComments(ctx, giteaItem.Index, entry.GitHubItemID)
 				if err != nil {
 					appCache.MarkFailed(cacheID, giteaItem.Index)
 					sendErr(fmt.Errorf("migrating comments: %v", err))
@@ -919,11 +911,7 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 					sendErr(err)
 					entry.IssueFailureCount++
 				} else {
-					var commentEntries map[int64]cache.CommentCacheEntry
-					if cached, ok := appCache.GetCompletedEntry(cacheID, giteaIssue.Index); ok {
-						commentEntries = cached.CommentEntries
-					}
-					commentEntries, err = entry.MigrateComments(ctx, giteaIssue.Index, entry.GitHubItemID, commentEntries)
+					commentEntries, err := entry.MigrateComments(ctx, giteaIssue.Index, entry.GitHubItemID)
 					if err != nil {
 						appCache.MarkFailed(cacheID, giteaIssue.Index)
 						sendErr(fmt.Errorf("migrating comments: %v", err))
@@ -974,11 +962,7 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 					sendErr(err)
 					entry.PRFailureCount++
 				} else {
-					var commentEntries map[int64]cache.CommentCacheEntry
-					if cached, ok := appCache.GetCompletedEntry(cacheID, giteaPullRequest.Index); ok {
-						commentEntries = cached.CommentEntries
-					}
-					commentEntries, err = entry.MigrateComments(ctx, giteaPullRequest.Index, entry.GitHubItemID, commentEntries)
+					commentEntries, err := entry.MigrateComments(ctx, giteaPullRequest.Index, entry.GitHubItemID)
 					if err != nil {
 						appCache.MarkFailed(cacheID, giteaPullRequest.Index)
 						sendErr(fmt.Errorf("migrating comments: %v", err))

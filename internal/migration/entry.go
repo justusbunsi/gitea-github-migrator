@@ -7,6 +7,7 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/google/go-github/v74/github"
 	"github.com/hashicorp/go-hclog"
+	"github.com/justusbunsi/gitea-github-migrator/internal/cache"
 	h "github.com/justusbunsi/gitea-github-migrator/internal/helpers"
 )
 
@@ -28,9 +29,10 @@ type Entry struct {
 	GitRepo             *git.Repository
 	giteaClient         *gitea.Client
 	githubClient        *github.Client
+	Cache               *cache.Cache
 }
 
-func NewEntry(giteaSlug, githubSlug string, giteaClient *gitea.Client, githubClient *github.Client, logger hclog.Logger) (*Entry, error) {
+func NewEntry(giteaSlug, githubSlug string, giteaClient *gitea.Client, githubClient *github.Client, logger hclog.Logger, appCache *cache.Cache) (*Entry, error) {
 	giteaOwner, giteaRepo, err := h.ParseProjectSlug(giteaSlug)
 	if err != nil {
 		return nil, fmt.Errorf("invalid gitea project: %w", err)
@@ -48,6 +50,7 @@ func NewEntry(giteaSlug, githubSlug string, giteaClient *gitea.Client, githubCli
 		Logger:       logger.With("GITEA", giteaSlug, "GITHUB", githubSlug),
 		giteaClient:  giteaClient,
 		githubClient: githubClient,
+		Cache:        appCache,
 	}
 
 	e.Logger.Info("searching for Gitea repository")
