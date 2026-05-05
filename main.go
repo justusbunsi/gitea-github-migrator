@@ -37,6 +37,7 @@ import (
 	"github.com/go-git/go-git/v5/storage/memory"
 	"github.com/google/go-github/v74/github"
 	"github.com/hashicorp/go-hclog"
+	"github.com/justusbunsi/gitea-github-migrator/internal/cache"
 	"github.com/justusbunsi/gitea-github-migrator/internal/constants"
 	"github.com/justusbunsi/gitea-github-migrator/internal/github_client"
 	h "github.com/justusbunsi/gitea-github-migrator/internal/helpers"
@@ -51,7 +52,7 @@ var githubDomain, githubRepo, githubToken, giteaDomain, giteaProject, giteaToken
 var githubAppID, githubAppInstallationID, githubAppPrivateKeyFile string
 
 var (
-	cache             *objectCache
+	appCache          *cache.Cache
 	errCount          int
 	logger            hclog.Logger
 	gh                *github.Client
@@ -173,7 +174,7 @@ func main() {
 		Output: logWriter,
 	})
 
-	cache = newObjectCache()
+	appCache = cache.New()
 
 	giteaToken = os.Getenv("GITEA_TOKEN")
 	if giteaToken == "" {
@@ -247,7 +248,7 @@ func main() {
 	}
 
 	if cacheFilePath != "" {
-		if err := cache.loadFromFile(cacheFilePath); err != nil {
+		if err := appCache.LoadFromFile(cacheFilePath); err != nil {
 			logger.Error("failed to load cache file", "path", cacheFilePath, "error", err)
 			os.Exit(1)
 		}
@@ -330,7 +331,7 @@ func main() {
 	} else {
 		migrationErr := performMigration(ctx, projects)
 		if cacheFilePath != "" {
-			if err := cache.saveToFile(cacheFilePath); err != nil {
+			if err := appCache.SaveToFile(cacheFilePath); err != nil {
 				logger.Error("failed to save cache file", "path", cacheFilePath, "error", err)
 				os.Exit(1)
 			}
@@ -525,13 +526,13 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 	var createRepo, repoDeleted bool
 	if err != nil {
 		createRepo = true
-		cache.purgeRepo(entry.GetCacheID())
+		appCache.PurgeRepo(entry.GetCacheID())
 	} else if deleteExistingRepos {
 		entry.Logger.Warn("existing repository was found on GitHub, proceeding to delete")
 		if _, err = gh.Repositories.Delete(ctx, entry.GitHubOwner, entry.GitHubRepo); err != nil {
 			return fmt.Errorf("deleting existing github repo: %v", err)
 		}
-		cache.purgeRepo(entry.GetCacheID())
+		appCache.PurgeRepo(entry.GetCacheID())
 		createRepo = true
 		repoDeleted = true
 	}
@@ -554,9 +555,9 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 	// new items skip the search because the cache is a complete source of truth from run 1.
 	// Scenario C – cache file, repo is NOT known (cache from a different run or wrong file):
 	// refused with an error so the user does not silently create duplicates.
-	repoKnownInCache := cacheFilePath != "" && cache.isKnownRepo(entry.GetCacheID())
+	repoKnownInCache := cacheFilePath != "" && appCache.IsKnownRepo(entry.GetCacheID())
 	githubLookupRequired := func(index int64) bool {
-		return !createRepo && (!repoKnownInCache || cache.isFailed(entry.GetCacheID(), index))
+		return !createRepo && (!repoKnownInCache || appCache.IsFailed(entry.GetCacheID(), index))
 	}
 
 	if cacheFilePath != "" && !createRepo && !repoKnownInCache && (enableIssues || enablePullRequests || enableReleases) {
@@ -595,7 +596,7 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 	}
 
 	if cacheFilePath != "" {
-		cache.markRepoKnown(entry.GetCacheID())
+		appCache.MarkRepoKnown(entry.GetCacheID())
 	}
 
 	entry.Logger.Debug("updating repository settings")
@@ -798,20 +799,20 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 				prHash := computePRContentHash(giteaPullRequests[idx])
 				err := migratePullRequest(ctx, entry, defaultBranch, githubLookupRequired(giteaPullRequests[idx].Index), prHash, giteaPullRequests[idx])
 				if err != nil {
-					cache.markFailed(cacheID, giteaPullRequests[idx].Index)
+					appCache.MarkFailed(cacheID, giteaPullRequests[idx].Index)
 					sendErr(err)
 					entry.PRFailureCount++
 					// fail-fast
 					entry.Logger.Error("stop migration due to error to prevent ID mismatch")
 					break
 				}
-				var commentEntries map[int64]migration.CommentCacheEntry
-				if cached, ok := cache.getCompletedEntry(cacheID, giteaPullRequests[idx].Index); ok {
+				var commentEntries map[int64]cache.CommentCacheEntry
+				if cached, ok := appCache.GetCompletedEntry(cacheID, giteaPullRequests[idx].Index); ok {
 					commentEntries = cached.CommentEntries
 				}
 				commentEntries, err = entry.MigrateComments(ctx, giteaPullRequests[idx].Index, entry.GitHubItemID, commentEntries)
 				if err != nil {
-					cache.markFailed(cacheID, giteaPullRequests[idx].Index)
+					appCache.MarkFailed(cacheID, giteaPullRequests[idx].Index)
 					sendErr(fmt.Errorf("migrating comments: %v", err))
 					entry.PRFailureCount++
 					// fail-fast
@@ -819,14 +820,14 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 					break
 				}
 				if giteaPullRequests[idx].Index != entry.GitHubItemID {
-					cache.markFailed(cacheID, giteaPullRequests[idx].Index)
+					appCache.MarkFailed(cacheID, giteaPullRequests[idx].Index)
 					sendErr(fmt.Errorf("migrating comments: %v", err))
 					entry.PRFailureCount++
 					// fail-fast
 					entry.Logger.Error("mismatch between Gitea item ID and generated GitHub item ID detected. Stop migration to prevent further ID mismatch. Needs manual investigation and re-doing whole migration.")
 					break
 				}
-				cache.markCompleted(cacheID, giteaPullRequests[idx].Index, itemCacheEntry{
+				appCache.MarkCompleted(cacheID, giteaPullRequests[idx].Index, cache.ItemCacheEntry{
 					ContentHash:    prHash,
 					GitHubItemID:   entry.GitHubItemID,
 					CommentEntries: commentEntries,
@@ -836,7 +837,7 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 				issueHash := computeIssueContentHash(giteaItem)
 				err := migrateIssue(ctx, entry, githubLookupRequired(giteaItem.Index), issueHash, giteaItem)
 				if err != nil {
-					cache.markFailed(cacheID, giteaItem.Index)
+					appCache.MarkFailed(cacheID, giteaItem.Index)
 					sendErr(err)
 					entry.IssueFailureCount++
 					// fail-fast
@@ -844,7 +845,7 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 					break
 				}
 				if giteaItem.Index != entry.GitHubItemID {
-					cache.markFailed(cacheID, giteaItem.Index)
+					appCache.MarkFailed(cacheID, giteaItem.Index)
 					sendErr(fmt.Errorf("migrating comments: %v", err))
 					entry.IssueFailureCount++
 					// fail-fast
@@ -852,7 +853,7 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 					break
 				}
 				if h.IsPhantomIssue(giteaItem) {
-					cache.markCompleted(cacheID, giteaItem.Index, itemCacheEntry{
+					appCache.MarkCompleted(cacheID, giteaItem.Index, cache.ItemCacheEntry{
 						ContentHash:  issueHash,
 						GitHubItemID: entry.GitHubItemID,
 					})
@@ -860,20 +861,20 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 					continue
 				}
 				// always migrate comments to update if necessary
-				var commentEntries map[int64]migration.CommentCacheEntry
-				if cached, ok := cache.getCompletedEntry(cacheID, giteaItem.Index); ok {
+				var commentEntries map[int64]cache.CommentCacheEntry
+				if cached, ok := appCache.GetCompletedEntry(cacheID, giteaItem.Index); ok {
 					commentEntries = cached.CommentEntries
 				}
 				commentEntries, err = entry.MigrateComments(ctx, giteaItem.Index, entry.GitHubItemID, commentEntries)
 				if err != nil {
-					cache.markFailed(cacheID, giteaItem.Index)
+					appCache.MarkFailed(cacheID, giteaItem.Index)
 					sendErr(fmt.Errorf("migrating comments: %v", err))
 					entry.IssueFailureCount++
 					// fail-fast
 					entry.Logger.Error("stop migration due to error to prevent ID mismatch")
 					break
 				}
-				cache.markCompleted(cacheID, giteaItem.Index, itemCacheEntry{
+				appCache.MarkCompleted(cacheID, giteaItem.Index, cache.ItemCacheEntry{
 					ContentHash:    issueHash,
 					GitHubItemID:   entry.GitHubItemID,
 					CommentEntries: commentEntries,
@@ -914,21 +915,21 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 				issueHash := computeIssueContentHash(giteaIssue)
 				err := migrateIssue(ctx, entry, githubLookupRequired(giteaIssue.Index), issueHash, giteaIssue)
 				if err != nil {
-					cache.markFailed(cacheID, giteaIssue.Index)
+					appCache.MarkFailed(cacheID, giteaIssue.Index)
 					sendErr(err)
 					entry.IssueFailureCount++
 				} else {
-					var commentEntries map[int64]migration.CommentCacheEntry
-					if cached, ok := cache.getCompletedEntry(cacheID, giteaIssue.Index); ok {
+					var commentEntries map[int64]cache.CommentCacheEntry
+					if cached, ok := appCache.GetCompletedEntry(cacheID, giteaIssue.Index); ok {
 						commentEntries = cached.CommentEntries
 					}
 					commentEntries, err = entry.MigrateComments(ctx, giteaIssue.Index, entry.GitHubItemID, commentEntries)
 					if err != nil {
-						cache.markFailed(cacheID, giteaIssue.Index)
+						appCache.MarkFailed(cacheID, giteaIssue.Index)
 						sendErr(fmt.Errorf("migrating comments: %v", err))
 						entry.IssueFailureCount++
 					} else {
-						cache.markCompleted(cacheID, giteaIssue.Index, itemCacheEntry{
+						appCache.MarkCompleted(cacheID, giteaIssue.Index, cache.ItemCacheEntry{
 							ContentHash:    issueHash,
 							GitHubItemID:   entry.GitHubItemID,
 							CommentEntries: commentEntries,
@@ -969,21 +970,21 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 				prHash := computePRContentHash(giteaPullRequest)
 				err := migratePullRequest(ctx, entry, defaultBranch, githubLookupRequired(giteaPullRequest.Index), prHash, giteaPullRequest)
 				if err != nil {
-					cache.markFailed(cacheID, giteaPullRequest.Index)
+					appCache.MarkFailed(cacheID, giteaPullRequest.Index)
 					sendErr(err)
 					entry.PRFailureCount++
 				} else {
-					var commentEntries map[int64]migration.CommentCacheEntry
-					if cached, ok := cache.getCompletedEntry(cacheID, giteaPullRequest.Index); ok {
+					var commentEntries map[int64]cache.CommentCacheEntry
+					if cached, ok := appCache.GetCompletedEntry(cacheID, giteaPullRequest.Index); ok {
 						commentEntries = cached.CommentEntries
 					}
 					commentEntries, err = entry.MigrateComments(ctx, giteaPullRequest.Index, entry.GitHubItemID, commentEntries)
 					if err != nil {
-						cache.markFailed(cacheID, giteaPullRequest.Index)
+						appCache.MarkFailed(cacheID, giteaPullRequest.Index)
 						sendErr(fmt.Errorf("migrating comments: %v", err))
 						entry.PRFailureCount++
 					} else {
-						cache.markCompleted(cacheID, giteaPullRequest.Index, itemCacheEntry{
+						appCache.MarkCompleted(cacheID, giteaPullRequest.Index, cache.ItemCacheEntry{
 							ContentHash:    prHash,
 							GitHubItemID:   entry.GitHubItemID,
 							CommentEntries: commentEntries,
@@ -1021,11 +1022,11 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 
 			err := migrateRelease(ctx, entry, giteaRelease)
 			if err != nil {
-				cache.markReleaseFailed(cacheID, giteaRelease.ID)
+				appCache.MarkReleaseFailed(cacheID, giteaRelease.ID)
 				sendErr(fmt.Errorf("migrating release %s: %v", giteaRelease.TagName, err))
 				entry.ReleaseFailureCount++
 			} else {
-				cache.markReleaseCompleted(cacheID, giteaRelease.ID, releaseCacheEntry{
+				appCache.MarkReleaseCompleted(cacheID, giteaRelease.ID, cache.ReleaseCacheEntry{
 					ContentHash:     computeReleaseContentHash(giteaRelease),
 					GitHubReleaseID: entry.GitHubReleaseID,
 				})
@@ -1068,8 +1069,8 @@ func computeIssueContentHash(issue *gitea.Issue) string {
 
 func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBranch string, githubLookupRequired bool, contentHash string, giteaPullRequest *gitea.PullRequest) error {
 	entry.GitHubItemID = 0
-	var resumeEntry *itemCacheEntry
-	if cached, ok := cache.getCompletedEntry(entry.GetCacheID(), giteaPullRequest.Index); ok {
+	var resumeEntry *cache.ItemCacheEntry
+	if cached, ok := appCache.GetCompletedEntry(entry.GetCacheID(), giteaPullRequest.Index); ok {
 		if cached.ContentHash == contentHash {
 			entry.Logger.Debug("skipping unchanged pull request (hash match)", "pr_number", giteaPullRequest.Index)
 			entry.GitHubItemID = cached.GitHubItemID
@@ -1584,16 +1585,16 @@ func migrateIssue(ctx context.Context, entry *migration.Entry, githubLookupRequi
 	// Phantom guard: handle before any content hash work
 	// It might be a Github-side existing PR that was later deleted on Gitea-side
 	if h.IsPhantomIssue(giteaIssue) {
-		if cached, ok := cache.getCompletedEntry(cacheID, giteaIssue.Index); ok {
+		if cached, ok := appCache.GetCompletedEntry(cacheID, giteaIssue.Index); ok {
 			entry.Logger.Debug("skipping already completed phantom issue", "issue_number", giteaIssue.Index)
 			entry.GitHubItemID = cached.GitHubItemID
 			return nil
 		}
 	}
 
-	var resumeEntry *itemCacheEntry
+	var resumeEntry *cache.ItemCacheEntry
 	if !h.IsPhantomIssue(giteaIssue) {
-		if cached, ok := cache.getCompletedEntry(cacheID, giteaIssue.Index); ok {
+		if cached, ok := appCache.GetCompletedEntry(cacheID, giteaIssue.Index); ok {
 			if cached.ContentHash == contentHash {
 				entry.Logger.Debug("skipping unchanged issue (hash match)", "issue_number", giteaIssue.Index)
 				entry.GitHubItemID = cached.GitHubItemID
@@ -1775,8 +1776,8 @@ func migrateRelease(ctx context.Context, entry *migration.Entry, giteaRelease *g
 
 	contentHash := computeReleaseContentHash(giteaRelease)
 
-	var resumeEntry *releaseCacheEntry
-	if cached, ok := cache.getCompletedReleaseEntry(cacheID, giteaRelease.ID); ok {
+	var resumeEntry *cache.ReleaseCacheEntry
+	if cached, ok := appCache.GetCompletedReleaseEntry(cacheID, giteaRelease.ID); ok {
 		if cached.ContentHash == contentHash {
 			entry.Logger.Debug("skipping unchanged release (hash match)", "tag", giteaRelease.TagName)
 			entry.GitHubReleaseID = cached.GitHubReleaseID

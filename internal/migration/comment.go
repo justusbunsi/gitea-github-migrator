@@ -9,16 +9,10 @@ import (
 
 	"code.gitea.io/sdk/gitea"
 	"github.com/google/go-github/v74/github"
+	"github.com/justusbunsi/gitea-github-migrator/internal/cache"
 	"github.com/justusbunsi/gitea-github-migrator/internal/constants"
 	h "github.com/justusbunsi/gitea-github-migrator/internal/helpers"
 )
-
-// CommentCacheEntry holds the content hash and GitHub comment ID for a single migrated comment.
-type CommentCacheEntry struct {
-	GiteaHash       string
-	GitHubHash      string
-	GitHubCommentID int64
-}
 
 func (e *Entry) buildCommentBody(comment *gitea.Comment, giteaItemId int64, githubItemId int64) (body, giteaHash, githubHash string) {
 	body = fmt.Sprintf(`> [!NOTE]
@@ -53,9 +47,9 @@ func (e *Entry) buildCommentBody(comment *gitea.Comment, giteaItemId int64, gith
 // When empty (non cache-file mode) the existing GitHub comments are fetched and matched by body content, populating the map for future runs.
 //
 // The returned map is the updated commentEntries and must be persisted by the caller.
-func (e *Entry) MigrateComments(ctx context.Context, giteaItemId int64, githubItemId int64, commentEntries map[int64]CommentCacheEntry) (map[int64]CommentCacheEntry, error) {
+func (e *Entry) MigrateComments(ctx context.Context, giteaItemId int64, githubItemId int64, commentEntries map[int64]cache.CommentCacheEntry) (map[int64]cache.CommentCacheEntry, error) {
 	if commentEntries == nil {
-		commentEntries = make(map[int64]CommentCacheEntry)
+		commentEntries = make(map[int64]cache.CommentCacheEntry)
 	}
 
 	var giteaComments []*gitea.Comment
@@ -113,7 +107,7 @@ func (e *Entry) MigrateComments(ctx context.Context, giteaItemId int64, githubIt
 				if err := h.SleepWithContext(ctx, constants.GithubApiPauseBetweenMutativeRequests); err != nil {
 					return nil, err
 				}
-				commentEntries[comment.ID] = CommentCacheEntry{GiteaHash: giteaHash, GitHubHash: githubHash, GitHubCommentID: cached.GitHubCommentID}
+				commentEntries[comment.ID] = cache.CommentCacheEntry{GiteaHash: giteaHash, GitHubHash: githubHash, GitHubCommentID: cached.GitHubCommentID}
 
 				continue
 			}
@@ -129,7 +123,7 @@ func (e *Entry) MigrateComments(ctx context.Context, giteaItemId int64, githubIt
 			if err := h.SleepWithContext(ctx, constants.GithubApiPauseBetweenMutativeRequests); err != nil {
 				return nil, err
 			}
-			commentEntries[comment.ID] = CommentCacheEntry{GiteaHash: giteaHash, GitHubHash: githubHash, GitHubCommentID: created.GetID()}
+			commentEntries[comment.ID] = cache.CommentCacheEntry{GiteaHash: giteaHash, GitHubHash: githubHash, GitHubCommentID: created.GetID()}
 		}
 		return commentEntries, nil
 	}
@@ -178,7 +172,7 @@ func (e *Entry) MigrateComments(ctx context.Context, giteaItemId int64, githubIt
 				if githubComment.GetID() == 0 {
 					return nil, fmt.Errorf("comment %d on gitea item #%d: GitHub returned ID 0", comment.ID, giteaItemId)
 				}
-				commentEntries[comment.ID] = CommentCacheEntry{GiteaHash: giteaHash, GitHubHash: githubHash, GitHubCommentID: githubComment.GetID()}
+				commentEntries[comment.ID] = cache.CommentCacheEntry{GiteaHash: giteaHash, GitHubHash: githubHash, GitHubCommentID: githubComment.GetID()}
 				break
 			}
 		}
@@ -195,7 +189,7 @@ func (e *Entry) MigrateComments(ctx context.Context, giteaItemId int64, githubIt
 			if err = h.SleepWithContext(ctx, constants.GithubApiPauseBetweenMutativeRequests); err != nil {
 				return nil, err
 			}
-			commentEntries[comment.ID] = CommentCacheEntry{GiteaHash: giteaHash, GitHubHash: githubHash, GitHubCommentID: created.GetID()}
+			commentEntries[comment.ID] = cache.CommentCacheEntry{GiteaHash: giteaHash, GitHubHash: githubHash, GitHubCommentID: created.GetID()}
 		}
 	}
 

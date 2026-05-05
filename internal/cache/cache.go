@@ -1,4 +1,4 @@
-package main
+package cache
 
 import (
 	"encoding/json"
@@ -10,7 +10,6 @@ import (
 	"code.gitea.io/sdk/gitea"
 	"github.com/google/go-github/v74/github"
 	h "github.com/justusbunsi/gitea-github-migrator/internal/helpers"
-	"github.com/justusbunsi/gitea-github-migrator/internal/migration"
 )
 
 const (
@@ -20,13 +19,19 @@ const (
 	giteaUserCacheType
 )
 
-type itemCacheEntry struct {
-	ContentHash    string
-	GitHubItemID   int64
-	CommentEntries map[int64]migration.CommentCacheEntry
+type CommentCacheEntry struct {
+	GiteaHash       string
+	GitHubHash      string
+	GitHubCommentID int64
 }
 
-type releaseCacheEntry struct {
+type ItemCacheEntry struct {
+	ContentHash    string
+	GitHubItemID   int64
+	CommentEntries map[int64]CommentCacheEntry
+}
+
+type ReleaseCacheEntry struct {
 	ContentHash     string
 	GitHubReleaseID int64
 }
@@ -37,12 +42,12 @@ type persistedReleaseEntry struct {
 	GitHubReleaseID int64  `json:"github_release_id"`
 }
 
-type objectCache struct {
+type Cache struct {
 	mutex             *sync.RWMutex
 	store             map[uint8]map[string]any
-	completed         map[string]map[int64]itemCacheEntry
+	completed         map[string]map[int64]ItemCacheEntry
 	failed            map[string]map[int64]struct{}
-	completedReleases map[string]map[int64]releaseCacheEntry
+	completedReleases map[string]map[int64]ReleaseCacheEntry
 	failedReleases    map[string]map[int64]struct{}
 }
 
@@ -67,24 +72,24 @@ type persistedCache struct {
 	FailedReleases    map[string][]int64                 `json:"failed_releases"`
 }
 
-func newObjectCache() *objectCache {
+func New() *Cache {
 	store := make(map[uint8]map[string]any)
 	store[githubPullRequestCacheType] = make(map[string]any)
 	store[githubSearchResultsCacheType] = make(map[string]any)
 	store[githubUserCacheType] = make(map[string]any)
 	store[giteaUserCacheType] = make(map[string]any)
 
-	return &objectCache{
+	return &Cache{
 		mutex:             new(sync.RWMutex),
 		store:             store,
-		completed:         make(map[string]map[int64]itemCacheEntry),
+		completed:         make(map[string]map[int64]ItemCacheEntry),
 		failed:            make(map[string]map[int64]struct{}),
-		completedReleases: make(map[string]map[int64]releaseCacheEntry),
+		completedReleases: make(map[string]map[int64]ReleaseCacheEntry),
 		failedReleases:    make(map[string]map[int64]struct{}),
 	}
 }
 
-func (c objectCache) isCompleted(repoKey string, index int64) bool {
+func (c Cache) IsCompleted(repoKey string, index int64) bool {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	if indices, ok := c.completed[repoKey]; ok {
@@ -94,21 +99,21 @@ func (c objectCache) isCompleted(repoKey string, index int64) bool {
 	return false
 }
 
-func (c objectCache) getCompletedEntry(repoKey string, index int64) (itemCacheEntry, bool) {
+func (c Cache) GetCompletedEntry(repoKey string, index int64) (ItemCacheEntry, bool) {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	if indices, ok := c.completed[repoKey]; ok {
 		entry, done := indices[index]
 		return entry, done
 	}
-	return itemCacheEntry{}, false
+	return ItemCacheEntry{}, false
 }
 
-func (c objectCache) markCompleted(repoKey string, index int64, entry itemCacheEntry) {
+func (c Cache) MarkCompleted(repoKey string, index int64, entry ItemCacheEntry) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	if _, ok := c.completed[repoKey]; !ok {
-		c.completed[repoKey] = make(map[int64]itemCacheEntry)
+		c.completed[repoKey] = make(map[int64]ItemCacheEntry)
 	}
 	c.completed[repoKey][index] = entry
 	if indices, ok := c.failed[repoKey]; ok {
@@ -116,15 +121,15 @@ func (c objectCache) markCompleted(repoKey string, index int64, entry itemCacheE
 	}
 }
 
-func (c objectCache) markRepoKnown(repoKey string) {
+func (c Cache) MarkRepoKnown(repoKey string) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	if _, ok := c.completed[repoKey]; !ok {
-		c.completed[repoKey] = make(map[int64]itemCacheEntry)
+		c.completed[repoKey] = make(map[int64]ItemCacheEntry)
 	}
 }
 
-func (c objectCache) isKnownRepo(repoKey string) bool {
+func (c Cache) IsKnownRepo(repoKey string) bool {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	if _, ok := c.completed[repoKey]; ok {
@@ -142,7 +147,7 @@ func (c objectCache) isKnownRepo(repoKey string) bool {
 	return false
 }
 
-func (c objectCache) isFailed(repoKey string, index int64) bool {
+func (c Cache) IsFailed(repoKey string, index int64) bool {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	if indices, ok := c.failed[repoKey]; ok {
@@ -152,7 +157,7 @@ func (c objectCache) isFailed(repoKey string, index int64) bool {
 	return false
 }
 
-func (c objectCache) markFailed(repoKey string, index int64) {
+func (c Cache) MarkFailed(repoKey string, index int64) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	if _, ok := c.failed[repoKey]; !ok {
@@ -161,7 +166,7 @@ func (c objectCache) markFailed(repoKey string, index int64) {
 	c.failed[repoKey][index] = struct{}{}
 }
 
-func (c objectCache) isReleaseCompleted(repoKey string, index int64) bool {
+func (c Cache) IsReleaseCompleted(repoKey string, index int64) bool {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	if indices, ok := c.completedReleases[repoKey]; ok {
@@ -171,21 +176,21 @@ func (c objectCache) isReleaseCompleted(repoKey string, index int64) bool {
 	return false
 }
 
-func (c objectCache) getCompletedReleaseEntry(repoKey string, index int64) (releaseCacheEntry, bool) {
+func (c Cache) GetCompletedReleaseEntry(repoKey string, index int64) (ReleaseCacheEntry, bool) {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	if indices, ok := c.completedReleases[repoKey]; ok {
 		entry, done := indices[index]
 		return entry, done
 	}
-	return releaseCacheEntry{}, false
+	return ReleaseCacheEntry{}, false
 }
 
-func (c objectCache) markReleaseCompleted(repoKey string, index int64, entry releaseCacheEntry) {
+func (c Cache) MarkReleaseCompleted(repoKey string, index int64, entry ReleaseCacheEntry) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	if _, ok := c.completedReleases[repoKey]; !ok {
-		c.completedReleases[repoKey] = make(map[int64]releaseCacheEntry)
+		c.completedReleases[repoKey] = make(map[int64]ReleaseCacheEntry)
 	}
 	c.completedReleases[repoKey][index] = entry
 	if indices, ok := c.failedReleases[repoKey]; ok {
@@ -193,7 +198,7 @@ func (c objectCache) markReleaseCompleted(repoKey string, index int64, entry rel
 	}
 }
 
-func (c objectCache) isReleaseFailed(repoKey string, index int64) bool {
+func (c Cache) IsReleaseFailed(repoKey string, index int64) bool {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	if indices, ok := c.failedReleases[repoKey]; ok {
@@ -203,7 +208,7 @@ func (c objectCache) isReleaseFailed(repoKey string, index int64) bool {
 	return false
 }
 
-func (c objectCache) markReleaseFailed(repoKey string, index int64) {
+func (c Cache) MarkReleaseFailed(repoKey string, index int64) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	if _, ok := c.failedReleases[repoKey]; !ok {
@@ -212,7 +217,7 @@ func (c objectCache) markReleaseFailed(repoKey string, index int64) {
 	c.failedReleases[repoKey][index] = struct{}{}
 }
 
-func (c objectCache) purgeRepo(repoKey string) {
+func (c Cache) PurgeRepo(repoKey string) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	delete(c.completed, repoKey)
@@ -221,7 +226,7 @@ func (c objectCache) purgeRepo(repoKey string) {
 	delete(c.failedReleases, repoKey)
 }
 
-func (c objectCache) loadFromFile(path string) error {
+func (c Cache) LoadFromFile(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -240,17 +245,17 @@ func (c objectCache) loadFromFile(path string) error {
 
 	for repoKey, entries := range p.CompletedItems {
 		if _, ok := c.completed[repoKey]; !ok {
-			c.completed[repoKey] = make(map[int64]itemCacheEntry)
+			c.completed[repoKey] = make(map[int64]ItemCacheEntry)
 		}
 		for _, pe := range entries {
-			ce := itemCacheEntry{
+			ce := ItemCacheEntry{
 				ContentHash:  pe.ContentHash,
 				GitHubItemID: pe.GitHubID,
 			}
 			if len(pe.CommentEntries) > 0 {
-				ce.CommentEntries = make(map[int64]migration.CommentCacheEntry, len(pe.CommentEntries))
+				ce.CommentEntries = make(map[int64]CommentCacheEntry, len(pe.CommentEntries))
 				for _, pce := range pe.CommentEntries {
-					ce.CommentEntries[pce.GiteaCommentID] = migration.CommentCacheEntry{
+					ce.CommentEntries[pce.GiteaCommentID] = CommentCacheEntry{
 						GiteaHash:       pce.GiteaHash,
 						GitHubHash:      pce.GitHubHash,
 						GitHubCommentID: pce.GitHubCommentID,
@@ -271,10 +276,10 @@ func (c objectCache) loadFromFile(path string) error {
 
 	for repoKey, entries := range p.CompletedReleases {
 		if _, ok := c.completedReleases[repoKey]; !ok {
-			c.completedReleases[repoKey] = make(map[int64]releaseCacheEntry)
+			c.completedReleases[repoKey] = make(map[int64]ReleaseCacheEntry)
 		}
 		for _, pe := range entries {
-			c.completedReleases[repoKey][pe.GiteaID] = releaseCacheEntry{
+			c.completedReleases[repoKey][pe.GiteaID] = ReleaseCacheEntry{
 				ContentHash:     pe.ContentHash,
 				GitHubReleaseID: pe.GitHubReleaseID,
 			}
@@ -292,7 +297,7 @@ func (c objectCache) loadFromFile(path string) error {
 	return nil
 }
 
-func (c objectCache) saveToFile(path string) error {
+func (c Cache) SaveToFile(path string) error {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 
@@ -366,7 +371,7 @@ func (c objectCache) saveToFile(path string) error {
 	return os.WriteFile(path, data, 0o644)
 }
 
-func (c objectCache) getGithubPullRequest(query string) *github.PullRequest {
+func (c Cache) GetGithubPullRequest(query string) *github.PullRequest {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	if v, ok := c.store[githubPullRequestCacheType][query]; ok {
@@ -375,13 +380,13 @@ func (c objectCache) getGithubPullRequest(query string) *github.PullRequest {
 	return nil
 }
 
-func (c objectCache) setGithubPullRequest(query string, result github.PullRequest) {
+func (c Cache) SetGithubPullRequest(query string, result github.PullRequest) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	c.store[githubPullRequestCacheType][query] = result
 }
 
-func (c objectCache) getGithubSearchResults(query string) *github.IssuesSearchResult {
+func (c Cache) GetGithubSearchResults(query string) *github.IssuesSearchResult {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	if v, ok := c.store[githubSearchResultsCacheType][query]; ok {
@@ -390,13 +395,13 @@ func (c objectCache) getGithubSearchResults(query string) *github.IssuesSearchRe
 	return nil
 }
 
-func (c objectCache) setGithubSearchResults(query string, result github.IssuesSearchResult) {
+func (c Cache) SetGithubSearchResults(query string, result github.IssuesSearchResult) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	c.store[githubSearchResultsCacheType][query] = result
 }
 
-func (c objectCache) getGithubUser(username string) *github.User {
+func (c Cache) GetGithubUser(username string) *github.User {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	if v, ok := c.store[giteaUserCacheType][username]; ok {
@@ -405,13 +410,13 @@ func (c objectCache) getGithubUser(username string) *github.User {
 	return nil
 }
 
-func (c objectCache) setGithubUser(username string, user github.User) {
+func (c Cache) SetGithubUser(username string, user github.User) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	c.store[giteaUserCacheType][username] = user
 }
 
-func (c objectCache) getGiteaUser(username string) *gitea.User {
+func (c Cache) GetGiteaUser(username string) *gitea.User {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	if v, ok := c.store[githubUserCacheType][username]; ok {
@@ -420,7 +425,7 @@ func (c objectCache) getGiteaUser(username string) *gitea.User {
 	return nil
 }
 
-func (c objectCache) setGiteaUser(username string, user gitea.User) {
+func (c Cache) SetGiteaUser(username string, user gitea.User) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	c.store[githubUserCacheType][username] = user

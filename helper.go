@@ -10,7 +10,7 @@ import (
 func getGithubPullRequest(ctx context.Context, org, repo string, prNumber int) (*github.PullRequest, error) {
 	var err error
 	cacheToken := fmt.Sprintf("%s/%s/%d", org, repo, prNumber)
-	pullRequest := cache.getGithubPullRequest(cacheToken)
+	pullRequest := appCache.GetGithubPullRequest(cacheToken)
 	if pullRequest == nil {
 		logger.Debug("retrieving pull request details", "github", fmt.Sprintf("%s/%s", org, repo), "pr_number", prNumber)
 		pullRequest, _, err = gh.PullRequests.Get(ctx, org, repo, prNumber)
@@ -23,7 +23,7 @@ func getGithubPullRequest(ctx context.Context, org, repo string, prNumber int) (
 		}
 
 		logger.Trace("caching pull request details", "github", fmt.Sprintf("%s/%s", org, repo), "pr_number", prNumber)
-		cache.setGithubPullRequest(cacheToken, *pullRequest)
+		appCache.SetGithubPullRequest(cacheToken, *pullRequest)
 	}
 
 	return pullRequest, nil
@@ -31,7 +31,7 @@ func getGithubPullRequest(ctx context.Context, org, repo string, prNumber int) (
 
 func getGithubSearchResults(ctx context.Context, query string) (*github.IssuesSearchResult, error) {
 	var err error
-	result := cache.getGithubSearchResults(query)
+	result := appCache.GetGithubSearchResults(query)
 	if result == nil {
 		logger.Debug("performing search", "query", query)
 		result, _, err = gh.Search.Issues(ctx, query, nil)
@@ -44,7 +44,7 @@ func getGithubSearchResults(ctx context.Context, query string) (*github.IssuesSe
 		}
 
 		logger.Trace("caching GitHub search result", "query", query)
-		cache.setGithubSearchResults(query, *result)
+		appCache.SetGithubSearchResults(query, *result)
 	}
 
 	return result, nil
@@ -52,7 +52,7 @@ func getGithubSearchResults(ctx context.Context, query string) (*github.IssuesSe
 
 func getGithubUser(ctx context.Context, username string) (*github.User, error) {
 	var err error
-	user := cache.getGithubUser(username)
+	user := appCache.GetGithubUser(username)
 	if user == nil {
 		logger.Debug("retrieving GitHub user details", "username", username)
 		if user, _, err = gh.Users.Get(ctx, username); err != nil {
@@ -64,7 +64,7 @@ func getGithubUser(ctx context.Context, username string) (*github.User, error) {
 		}
 
 		logger.Trace("caching GitHub user", "username", username)
-		cache.setGithubUser(username, *user)
+		appCache.SetGithubUser(username, *user)
 	}
 
 	if user.Type == nil {
