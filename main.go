@@ -1338,14 +1338,13 @@ func migratePullRequest(ctx context.Context, entry *migration.Entry, defaultBran
 
 	entry.Logger.Debug("determining pull request approvers", "repository_id", entry.GiteaRepository.ID, "pr_number", giteaPullRequest.Index)
 	approvers := make([]string, 0)
-	reviews, _, err := gi.ListPullReviews(entry.GiteaOwner, entry.GiteaRepo, giteaPullRequest.Index, gitea.ListPullReviewsOptions{})
+	reviews, err := entry.GetAllPullRequestReviews(ctx, giteaPullRequest.Index)
 	if err != nil {
-		sendErr(fmt.Errorf("listing pull request reviews: %v", err))
-	} else {
-		for _, review := range reviews {
-			if review.State == gitea.ReviewStateApproved {
-				approvers = append(approvers, h.GetGitHubAccountReference(review.Reviewer))
-			}
+		return err
+	}
+	for _, review := range reviews {
+		if review.State == gitea.ReviewStateApproved {
+			approvers = append(approvers, h.GetGitHubAccountReference(review.Reviewer))
 		}
 	}
 

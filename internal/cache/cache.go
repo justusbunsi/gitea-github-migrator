@@ -17,6 +17,7 @@ const (
 	githubSearchResultsCacheType
 	githubUserCacheType
 	giteaUserCacheType
+	giteaPullReviewsCacheType
 )
 
 type CommentCacheEntry struct {
@@ -78,6 +79,7 @@ func New() *Cache {
 	store[githubSearchResultsCacheType] = make(map[string]any)
 	store[githubUserCacheType] = make(map[string]any)
 	store[giteaUserCacheType] = make(map[string]any)
+	store[giteaPullReviewsCacheType] = make(map[string]any)
 
 	return &Cache{
 		mutex:             new(sync.RWMutex),
@@ -414,6 +416,21 @@ func (c Cache) SetGithubUser(username string, user github.User) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	c.store[giteaUserCacheType][username] = user
+}
+
+func (c Cache) GetGiteaPullReviews(key string) []*gitea.PullReview {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	if v, ok := c.store[giteaPullReviewsCacheType][key]; ok {
+		return v.([]*gitea.PullReview)
+	}
+	return nil
+}
+
+func (c Cache) SetGiteaPullReviews(key string, reviews []*gitea.PullReview) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	c.store[giteaPullReviewsCacheType][key] = reviews
 }
 
 func (c Cache) GetGiteaUser(username string) *gitea.User {
