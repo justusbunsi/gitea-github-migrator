@@ -215,7 +215,7 @@ func (e *Entry) MigratePullRequestReviews(ctx context.Context, giteaItemId int64
 		reviewEntries = make(map[int64]cache.ReviewCacheEntry)
 	}
 
-	e.Logger.Info("migrating pull request reviews from Gitea to GitHub", "item_id", githubItemId, "count", len(reviews))
+	e.Logger.Debug("migrating pull request reviews from Gitea to GitHub", "item_id", githubItemId, "count", len(reviews))
 
 	// cache-file mode: use cached GitHub comment IDs for direct create/update.
 	if len(reviewEntries) > 0 {
