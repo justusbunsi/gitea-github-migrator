@@ -26,10 +26,16 @@ type CommentCacheEntry struct {
 	GitHubCommentID int64
 }
 
+type ReviewCacheEntry struct {
+	ContentHash     string
+	GitHubCommentID int64
+}
+
 type ItemCacheEntry struct {
 	ContentHash    string
 	GitHubItemID   int64
 	CommentEntries map[int64]CommentCacheEntry
+	ReviewEntries  map[int64]ReviewCacheEntry
 }
 
 type ReleaseCacheEntry struct {
@@ -59,11 +65,18 @@ type persistedCommentEntry struct {
 	GitHubCommentID int64  `json:"github_id"`
 }
 
+type persistedReviewEntry struct {
+	GiteaReviewID   int64  `json:"gitea_id"`
+	ContentHash     string `json:"content_hash"`
+	GitHubCommentID int64  `json:"github_id"`
+}
+
 type persistedItemEntry struct {
 	GiteaID        int64                   `json:"gitea_id"`
 	ContentHash    string                  `json:"content_hash"`
 	GitHubID       int64                   `json:"github_id"`
 	CommentEntries []persistedCommentEntry `json:"comment_entries"`
+	ReviewEntries  []persistedReviewEntry  `json:"review_entries"`
 }
 
 type persistedCache struct {
@@ -264,6 +277,15 @@ func (c Cache) LoadFromFile(path string) error {
 					}
 				}
 			}
+			if len(pe.ReviewEntries) > 0 {
+				ce.ReviewEntries = make(map[int64]ReviewCacheEntry, len(pe.ReviewEntries))
+				for _, pre := range pe.ReviewEntries {
+					ce.ReviewEntries[pre.GiteaReviewID] = ReviewCacheEntry{
+						ContentHash:     pre.ContentHash,
+						GitHubCommentID: pre.GitHubCommentID,
+					}
+				}
+			}
 			c.completed[repoKey][pe.GiteaID] = ce
 		}
 	}
@@ -329,6 +351,17 @@ func (c Cache) SaveToFile(path string) error {
 					})
 				}
 				slices.SortFunc(pe.CommentEntries, func(a, b persistedCommentEntry) int { return int(a.GiteaCommentID - b.GiteaCommentID) })
+			}
+			if len(entry.ReviewEntries) > 0 {
+				pe.ReviewEntries = make([]persistedReviewEntry, 0, len(entry.ReviewEntries))
+				for reviewID, re := range entry.ReviewEntries {
+					pe.ReviewEntries = append(pe.ReviewEntries, persistedReviewEntry{
+						GiteaReviewID:   reviewID,
+						ContentHash:     re.ContentHash,
+						GitHubCommentID: re.GitHubCommentID,
+					})
+				}
+				slices.SortFunc(pe.ReviewEntries, func(a, b persistedReviewEntry) int { return int(a.GiteaReviewID - b.GiteaReviewID) })
 			}
 			list = append(list, pe)
 		}

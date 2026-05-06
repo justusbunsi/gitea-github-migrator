@@ -823,10 +823,20 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 					entry.Logger.Error("mismatch between Gitea item ID and generated GitHub item ID detected. Stop migration to prevent further ID mismatch. Needs manual investigation and re-doing whole migration.")
 					break
 				}
+				reviewEntries, err := entry.MigratePullRequestReviews(ctx, giteaPullRequests[idx].Index, entry.GitHubItemID)
+				if err != nil {
+					appCache.MarkFailed(cacheID, giteaPullRequests[idx].Index)
+					sendErr(fmt.Errorf("migrating pull request reviews: %v", err))
+					entry.PRFailureCount++
+					// fail-fast
+					entry.Logger.Error("stop migration due to error on pull request review migration")
+					break
+				}
 				appCache.MarkCompleted(cacheID, giteaPullRequests[idx].Index, cache.ItemCacheEntry{
 					ContentHash:    prHash,
 					GitHubItemID:   entry.GitHubItemID,
 					CommentEntries: commentEntries,
+					ReviewEntries:  reviewEntries,
 				})
 				entry.PRSuccessCount++
 			} else {
@@ -968,12 +978,20 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 						sendErr(fmt.Errorf("migrating comments: %v", err))
 						entry.PRFailureCount++
 					} else {
-						appCache.MarkCompleted(cacheID, giteaPullRequest.Index, cache.ItemCacheEntry{
-							ContentHash:    prHash,
-							GitHubItemID:   entry.GitHubItemID,
-							CommentEntries: commentEntries,
-						})
-						entry.PRSuccessCount++
+						reviewEntries, err := entry.MigratePullRequestReviews(ctx, giteaPullRequest.Index, entry.GitHubItemID)
+						if err != nil {
+							appCache.MarkFailed(cacheID, giteaPullRequest.Index)
+							sendErr(fmt.Errorf("migrating pull request reviews: %v", err))
+							entry.PRFailureCount++
+						} else {
+							appCache.MarkCompleted(cacheID, giteaPullRequest.Index, cache.ItemCacheEntry{
+								ContentHash:    prHash,
+								GitHubItemID:   entry.GitHubItemID,
+								CommentEntries: commentEntries,
+								ReviewEntries:  reviewEntries,
+							})
+							entry.PRSuccessCount++
+						}
 					}
 				}
 				if bar != nil {
