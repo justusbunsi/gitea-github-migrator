@@ -207,6 +207,15 @@ func (e *Entry) MigratePullRequestReviews(ctx context.Context, giteaItemId int64
 
 	sort.Slice(reviews, func(i, j int) bool { return reviews[i].ID < reviews[j].ID })
 
+	// We don't care about gitea.ReviewStatePending or gitea.ReviewStateRequestReview state, as those do not provide any meaningful migration data.
+	filtered := make([]*gitea.PullReview, 0, len(reviews))
+	for _, r := range reviews {
+		if r.State == gitea.ReviewStateApproved || r.State == gitea.ReviewStateRequestChanges || r.State == gitea.ReviewStateComment {
+			filtered = append(filtered, r)
+		}
+	}
+	reviews = filtered
+
 	var reviewEntries map[int64]cache.ReviewCacheEntry
 	if cached, ok := e.Cache.GetCompletedEntry(e.GetCacheID(), giteaItemId); ok {
 		reviewEntries = cached.ReviewEntries
