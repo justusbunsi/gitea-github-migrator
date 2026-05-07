@@ -803,7 +803,7 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 					sendErr(err)
 					entry.PRFailureCount++
 					// fail-fast
-					entry.Logger.Error("stop migration due to error to prevent ID mismatch")
+					entry.Logger.Error("stop migration due to error on pull request migration")
 					break
 				}
 				commentEntries, err := entry.MigrateComments(ctx, giteaPullRequests[idx].Index, entry.GitHubItemID)
@@ -812,7 +812,7 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 					sendErr(fmt.Errorf("migrating comments: %v", err))
 					entry.PRFailureCount++
 					// fail-fast
-					entry.Logger.Error("stop migration due to error to prevent ID mismatch")
+					entry.Logger.Error("stop migration due to error on pull request comment migration")
 					break
 				}
 				if giteaPullRequests[idx].Index != entry.GitHubItemID {
@@ -847,7 +847,7 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 					sendErr(err)
 					entry.IssueFailureCount++
 					// fail-fast
-					entry.Logger.Error("stop migration due to error to prevent ID mismatch")
+					entry.Logger.Error("stop migration due to error on issue migration")
 					break
 				}
 				if giteaItem.Index != entry.GitHubItemID {
@@ -873,7 +873,7 @@ func migrateProject(ctx context.Context, proj []string, bar *progressbar.Bar) er
 					sendErr(fmt.Errorf("migrating comments: %v", err))
 					entry.IssueFailureCount++
 					// fail-fast
-					entry.Logger.Error("stop migration due to error to prevent ID mismatch")
+					entry.Logger.Error("stop migration due to error on issue comment migration")
 					break
 				}
 				appCache.MarkCompleted(cacheID, giteaItem.Index, cache.ItemCacheEntry{
